@@ -125,12 +125,32 @@ git tag v0.2.0 && git push origin v0.2.0
 
 1. [Releases](../../releases)에서 `MacAIUsageBar-<버전>.zip` 다운로드 → 압축 해제 →
    `MacAIUsageBar.app`을 `/Applications`로 이동.
-2. ad-hoc 서명이라 Gatekeeper가 처음 실행을 막는다. **우클릭 → 열기 → 열기**로 한 번
-   허용하거나:
+2. Gatekeeper 해제 — 터미널에서:
    ```sh
    xattr -dr com.apple.quarantine /Applications/MacAIUsageBar.app
    ```
 3. 메뉴바에만 뜬다(Dock 아이콘 없음). 종료는 드롭다운의 전원 아이콘.
+
+Apple Silicon(arm64) 전용이다. Intel Mac용이 필요하면 `build_app.sh`의 `swift build`에
+`--arch arm64 --arch x86_64`를 넘겨 유니버설 바이너리로 만들면 된다.
+
+#### "Apple은 악성 코드가 없음을 확인할 수 없습니다" 경고
+
+Apple Developer 계정($99/년) 없이 ad-hoc 서명만 했기 때문에 **공증(notarization)이 없어서**
+나는 경고다. 앱이 손상된 것도, 빌드가 잘못된 것도 아니다. 브라우저로 zip을 받으면
+`com.apple.quarantine` 속성이 붙고 그 상태로 열면 차단된다.
+
+해제 방법:
+
+| 방법 | 절차 |
+|---|---|
+| 터미널 (권장) | `xattr -dr com.apple.quarantine /Applications/MacAIUsageBar.app` |
+| GUI | 앱을 한 번 실행해 경고를 띄운 뒤 → 시스템 설정 → 개인정보 보호 및 보안 → 아래로 스크롤 → **"확인 없이 열기"** |
+
+**macOS 15(Sequoia)부터는 Finder에서 우클릭 → 열기로 우회되지 않는다.** 위 두 방법만 유효하다.
+
+근본 해결은 Apple Developer Program에 가입해 Developer ID 서명 + 공증을 붙이는 것인데,
+개인용이라 하지 않고 있다. 현재 상태는 `spctl -a -t exec <앱>`으로 확인하면 `rejected`로 나온다.
 
 ### 로컬에서 테스트 돌리기
 
