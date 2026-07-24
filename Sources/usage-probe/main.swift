@@ -41,15 +41,12 @@ func environmentReport() {
     let home = FileManager.default.homeDirectoryForCurrentUser
     print("  home: \(home.path)")
 
-    let sessions = home.appendingPathComponent(".codex/sessions")
-    let files = CodexReader.diagnosticSessionCount()
-    print("  codex sessions dir: \(sessions.path) (존재: \(FileManager.default.fileExists(atPath: sessions.path)))")
-    print("  codex rollout .jsonl 개수(최근 스캔분): \(files)")
-
-    print("  claude 자격증명: \(ClaudeReader.diagnosticCredentialSource())")
+    print("  codex 인증:   \(CodexReader.diagnosticAuthSource())")
+    print("  codex 폴백 로그: \(CodexReader.diagnosticSessionCount())개")
+    print("  claude 인증:  \(ClaudeReader.diagnosticCredentialSource())")
     print()
 }
 
 environmentReport()
-report(CodexReader.latest())
+report(CodexReader.fetch())
 report(ClaudeReader.fetch())

@@ -48,7 +48,66 @@ final class CodexParseTests: XCTestCase {
     }
 }
 
+/// Shape of the live `wham/usage` reply the Codex CLI polls.
+final class CodexLiveParseTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_785_000_000)
+
+    func testParsesWeeklyPrimaryWindow() {
+        let obj: [String: Any] = ["rate_limit": [
+            "primary_window": ["used_percent": 94, "limit_window_seconds": 604800,
+                               "reset_at": 1_785_261_651],
+            "secondary_window": NSNull(),
+        ]]
+        let usage = CodexReader.parseUsage(obj, now: now)
+        XCTAssertNil(usage?.fiveHour)
+        XCTAssertEqual(usage?.weekly?.window, .weekly)
+        XCTAssertEqual(usage?.weekly?.usedPercent, 94)
+        XCTAssertEqual(usage?.weekly?.resetsAt, Date(timeIntervalSince1970: 1_785_261_651))
+    }
+
+    func testMapsFiveHourAndWeeklyByWindowLength() {
+        let obj: [String: Any] = ["rate_limit": [
+            "primary_window": ["used_percent": 8, "limit_window_seconds": 18000, "reset_at": 1_785_010_000],
+            "secondary_window": ["used_percent": 10, "limit_window_seconds": 604800, "reset_at": 1_785_500_000],
+        ]]
+        let usage = CodexReader.parseUsage(obj, now: now)
+        XCTAssertEqual(usage?.fiveHour?.usedPercent, 8)
+        XCTAssertEqual(usage?.weekly?.usedPercent, 10)
+    }
+
+    // Some replies carry only a relative reset.
+    func testFallsBackToResetAfterSeconds() {
+        let w = CodexReader.parseWindow(
+            ["used_percent": 50, "limit_window_seconds": 18000, "reset_after_seconds": 600], now: now)
+        XCTAssertEqual(w?.resetsAt, now.addingTimeInterval(600))
+    }
+
+    func testRejectsEmptyOrLimitlessPayloads() {
+        XCTAssertNil(CodexReader.parseUsage([:], now: now))
+        XCTAssertNil(CodexReader.parseUsage(["rate_limit": [:]], now: now))
+        XCTAssertNil(CodexReader.parseWindow(["used_percent": 5], now: now))
+    }
+
+    func testTokenExpiryReadsJWTExpClaim() {
+        // {"exp":1785261651} base64url, unsigned — parsed for display only.
+        let payload = Data(#"{"exp":1785261651}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        XCTAssertEqual(CodexReader.tokenExpiry("header.\(payload).sig"),
+                       Date(timeIntervalSince1970: 1_785_261_651))
+        XCTAssertNil(CodexReader.tokenExpiry("not-a-jwt"))
+    }
+}
+
 final class ClaudeTokenTests: XCTestCase {
+    func testExpiresAtReadsMilliseconds() {
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"t","expiresAt":1785261651000}}"#.utf8)
+        XCTAssertEqual(ClaudeReader.expiresAt(from: data),
+                       Date(timeIntervalSince1970: 1_785_261_651))
+        XCTAssertNil(ClaudeReader.expiresAt(from: Data(#"{"claudeAiOauth":{}}"#.utf8)))
+    }
+
     func testParsesCredentialsFileShape() {
         let data = #"{"claudeAiOauth":{"accessToken":"sk-tok","refreshToken":"r"}}"#.data(using: .utf8)!
         XCTAssertEqual(ClaudeReader.parseToken(from: data), "sk-tok")
