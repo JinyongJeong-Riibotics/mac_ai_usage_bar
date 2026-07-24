@@ -105,6 +105,15 @@ private struct ProviderSection: View {
                 WindowRow(label: "주간", window: usage?.weekly, settings: settings)
             }
 
+            // Codex numbers come from this machine's local session logs, so they
+            // are only as fresh as the last local Codex run. Say so when the
+            // sample is stale, otherwise an old reading looks like a live one.
+            if let usage, let staleness = staleSampleNotice(usage) {
+                Text(staleness)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             if let notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption2)
@@ -112,6 +121,17 @@ private struct ProviderSection: View {
             }
         }
     }
+}
+
+/// Codex reads local rollout logs, so a machine that has not run Codex in a
+/// while keeps reporting the last percentage it saw. Surface the sample age
+/// once it is old enough to mislead (Claude is fetched live, so it is exempt).
+func staleSampleNotice(_ usage: ProviderUsage, now: Date = Date()) -> String? {
+    guard usage.provider == .codex else { return nil }
+    guard usage.fiveHour != nil || usage.weekly != nil else { return nil }
+    let age = now.timeIntervalSince(usage.sampledAt)
+    guard age > 3600 else { return nil }
+    return "이 PC의 Codex 로그 기준 · \(formatReset(age)) 전 기록"
 }
 
 private struct WindowRow: View {

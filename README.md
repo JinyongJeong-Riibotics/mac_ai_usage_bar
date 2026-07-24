@@ -152,6 +152,32 @@ Apple Developer 계정($99/년) 없이 ad-hoc 서명만 했기 때문에 **공�
 근본 해결은 Apple Developer Program에 가입해 Developer ID 서명 + 공증을 붙이는 것인데,
 개인용이라 하지 않고 있다. 현재 상태는 `spctl -a -t exec <앱>`으로 확인하면 `rejected`로 나온다.
 
+## 문제 해결
+
+앱이 무엇을 읽고 있는지 그대로 출력하는 진단 CLI가 번들 안에 함께 들어 있다.
+(토큰 값은 출력하지 않는다.)
+
+```sh
+/Applications/MacAIUsageBar.app/Contents/MacOS/usage-probe
+```
+
+### Claude이 "인증 정보 없음"으로 나온다
+
+Claude Code는 macOS에서 OAuth 토큰을 **로그인 키체인**(`Claude Code-credentials`)에
+저장하고, 설치에 따라 `~/.claude/.credentials.json`을 남기기도 한다. 앱은 파일을 먼저
+보고 없으면 키체인을 읽는다. 키체인을 처음 읽을 때는 **접근 허용 대화상자**가 뜨므로
+"항상 허용"을 눌러야 한다. ad-hoc 서명이라 새 버전을 설치하면 앱의 코드 서명이 바뀌어
+다시 물어볼 수 있다.
+
+`usage-probe`의 `claude 자격증명:` 줄이 실패 원인을 그대로 알려준다.
+
+### Codex 숫자가 낡았거나 다른 PC와 다르다
+
+Codex는 네트워크가 아니라 **그 PC의 `~/.codex/sessions` 로컬 로그**에서 읽는다. 즉
+그 PC에서 Codex를 마지막으로 돌렸을 때의 값이다. 다른 PC와 값이 다르거나 오래된
+값이 보이는 건 이 때문이며, 샘플이 1시간 이상 지났으면 메뉴에 기록 시각을 함께 표시한다.
+해당 PC에서 Codex를 한 번 돌리면 갱신된다.
+
 ### 로컬에서 테스트 돌리기
 
 `xcode-select`가 Command Line Tools를 가리키면 `XCTest`가 없어 `swift test`가 실패한다:

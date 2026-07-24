@@ -28,8 +28,28 @@ func report(_ u: ProviderUsage) {
     }
     printWindow("5h", u.fiveHour)
     printWindow("Weekly", u.weekly)
+    let age = Date().timeIntervalSince(u.sampledAt)
+    print("  sampled: \(fmtReset(age)) 전")
     print()
 }
 
+/// Where each provider's data comes from, so a machine that reports the wrong
+/// numbers can be diagnosed without guessing. Prints no secrets — only whether
+/// a token was found and from which store.
+func environmentReport() {
+    print("========== 환경 ==========")
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    print("  home: \(home.path)")
+
+    let sessions = home.appendingPathComponent(".codex/sessions")
+    let files = CodexReader.diagnosticSessionCount()
+    print("  codex sessions dir: \(sessions.path) (존재: \(FileManager.default.fileExists(atPath: sessions.path)))")
+    print("  codex rollout .jsonl 개수(최근 스캔분): \(files)")
+
+    print("  claude 자격증명: \(ClaudeReader.diagnosticCredentialSource())")
+    print()
+}
+
+environmentReport()
 report(CodexReader.latest())
 report(ClaudeReader.fetch())

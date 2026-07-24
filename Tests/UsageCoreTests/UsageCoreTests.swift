@@ -48,6 +48,29 @@ final class CodexParseTests: XCTestCase {
     }
 }
 
+final class ClaudeTokenTests: XCTestCase {
+    func testParsesCredentialsFileShape() {
+        let data = #"{"claudeAiOauth":{"accessToken":"sk-tok","refreshToken":"r"}}"#.data(using: .utf8)!
+        XCTAssertEqual(ClaudeReader.parseToken(from: data), "sk-tok")
+    }
+
+    func testParsesFlatAccessTokenShape() {
+        let data = #"{"accessToken":"sk-flat"}"#.data(using: .utf8)!
+        XCTAssertEqual(ClaudeReader.parseToken(from: data), "sk-flat")
+    }
+
+    // A keychain item could hold the token as a bare string rather than JSON.
+    func testParsesBareTokenString() {
+        XCTAssertEqual(ClaudeReader.parseToken(from: Data(" sk-raw \n".utf8)), "sk-raw")
+    }
+
+    func testRejectsEmptyAndTokenlessPayloads() {
+        XCTAssertNil(ClaudeReader.parseToken(from: Data()))
+        XCTAssertNil(ClaudeReader.parseToken(from: Data(#"{"claudeAiOauth":{}}"#.utf8)))
+        XCTAssertNil(ClaudeReader.parseToken(from: Data(#"{"claudeAiOauth":{"accessToken":""}}"#.utf8)))
+    }
+}
+
 final class ClaudeParseTests: XCTestCase {
     func testParsesBothWindows() {
         let obj: [String: Any] = [
