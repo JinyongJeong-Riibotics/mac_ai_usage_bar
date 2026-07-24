@@ -11,14 +11,14 @@ struct MenuContentView: View {
 
             if settings.showCodex {
                 ProviderSection(title: "Codex", systemImage: "chevron.left.forwardslash.chevron.right",
-                                usage: store.codex, mode: settings.displayMode)
+                                usage: store.codex, settings: settings)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
             }
             if settings.showCodex && settings.showClaude { Divider().padding(.horizontal, 14) }
             if settings.showClaude {
                 ProviderSection(title: "Claude", systemImage: "sparkle",
-                                usage: store.claude, mode: settings.displayMode,
+                                usage: store.claude, settings: settings,
                                 notice: store.claudeNotice)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -84,7 +84,7 @@ private struct ProviderSection: View {
     let title: String
     let systemImage: String
     let usage: ProviderUsage?
-    let mode: DisplayMode
+    @ObservedObject var settings: AppSettings
     var notice: String? = nil
 
     var body: some View {
@@ -101,8 +101,8 @@ private struct ProviderSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                WindowRow(label: "5시간", window: usage?.fiveHour, mode: mode)
-                WindowRow(label: "주간", window: usage?.weekly, mode: mode)
+                WindowRow(label: "5시간", window: usage?.fiveHour, settings: settings)
+                WindowRow(label: "주간", window: usage?.weekly, settings: settings)
             }
 
             if let notice {
@@ -117,7 +117,7 @@ private struct ProviderSection: View {
 private struct WindowRow: View {
     let label: String
     let window: RateWindow?
-    let mode: DisplayMode
+    @ObservedObject var settings: AppSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -127,7 +127,7 @@ private struct WindowRow: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .leading)
                 if let w = window {
-                    Text(formatPercent(displayedPercent(usedPercent: w.usedPercent, mode: mode)))
+                    Text(formatPercent(displayedPercent(usedPercent: w.usedPercent, mode: settings.displayMode)))
                         .font(.callout.monospacedDigit().weight(.medium))
                         .foregroundStyle(color(forUsed: w.usedPercent))
                     Spacer()
@@ -156,10 +156,6 @@ private struct WindowRow: View {
     // Color always reflects how *used up* the window is, regardless of whether
     // we display the used or the remaining number — red always means danger.
     private func color(forUsed pct: Double) -> Color {
-        switch pct {
-        case ..<50: return .green
-        case ..<80: return .yellow
-        default: return .red
-        }
+        severity(usedPercent: pct, settings: settings).detailColor
     }
 }

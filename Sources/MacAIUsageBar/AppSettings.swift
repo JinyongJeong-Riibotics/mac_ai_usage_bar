@@ -29,6 +29,14 @@ final class AppSettings: ObservableObject {
     @Published var codexInterval: Double { didSet { defaults.set(codexInterval, forKey: Keys.codexInterval) } }
     @Published var claudeInterval: Double { didSet { defaults.set(claudeInterval, forKey: Keys.claudeInterval) } }
 
+    // Warning / notification behavior. `warnThreshold` is a used-percentage; the
+    // menu bar goes orange one tier below it and red at/above it.
+    @Published var notificationsEnabled: Bool { didSet { defaults.set(notificationsEnabled, forKey: Keys.notificationsEnabled) } }
+    @Published var colorMenuBar: Bool { didSet { defaults.set(colorMenuBar, forKey: Keys.colorMenuBar) } }
+    @Published var warnThreshold: Double { didSet { defaults.set(warnThreshold, forKey: Keys.warnThreshold) } }
+
+    var cautionThreshold: Double { max(0, warnThreshold - 15) }
+
     static let claudeMinInterval: Double = 180
 
     private let defaults = UserDefaults.standard
@@ -40,6 +48,9 @@ final class AppSettings: ObservableObject {
         static let showClaude = "showClaude"
         static let codexInterval = "codexInterval"
         static let claudeInterval = "claudeInterval"
+        static let notificationsEnabled = "notificationsEnabled"
+        static let colorMenuBar = "colorMenuBar"
+        static let warnThreshold = "warnThreshold"
     }
 
     private init() {
@@ -51,6 +62,9 @@ final class AppSettings: ObservableObject {
         let claude = defaults.object(forKey: Keys.claudeInterval) as? Double ?? 300
         codexInterval = max(15, codex)
         claudeInterval = max(AppSettings.claudeMinInterval, claude)
+        notificationsEnabled = defaults.object(forKey: Keys.notificationsEnabled) as? Bool ?? true
+        colorMenuBar = defaults.object(forKey: Keys.colorMenuBar) as? Bool ?? true
+        warnThreshold = defaults.object(forKey: Keys.warnThreshold) as? Double ?? 90
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 

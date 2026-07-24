@@ -53,6 +53,30 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
                     .tint(.blue)
             }
+
+            Section {
+                Toggle("임계값 알림", isOn: $settings.notificationsEnabled)
+                    .toggleStyle(.switch)
+                    .tint(.blue)
+                Toggle("메뉴바 색상 경고", isOn: $settings.colorMenuBar)
+                    .toggleStyle(.switch)
+                    .tint(.blue)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text("경고 임계값")
+                        Spacer()
+                        Text("\(Int(settings.warnThreshold))%")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Slider(value: $settings.warnThreshold, in: 50...95, step: 5)
+                }
+            } header: {
+                Text("알림 및 경고")
+            } footer: {
+                Text("사용률이 임계값을 넘으면 알림을 보내고 메뉴바를 빨갛게 표시합니다. 그 아래 한 단계(−15%)에서는 주황색으로 표시합니다. (알림은 정식 .app으로 실행할 때만 동작)")
+                    .font(.caption)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 360)

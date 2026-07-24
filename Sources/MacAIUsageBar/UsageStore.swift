@@ -10,6 +10,7 @@ final class UsageStore: ObservableObject {
     @Published var lastRefresh: Date?
 
     private let settings = AppSettings.shared
+    private let notifier = UsageNotifier()
     private var codexTimer: Timer?
     private var claudeTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
@@ -20,6 +21,7 @@ final class UsageStore: ObservableObject {
     private let maxBackoff: Double = 8
 
     func start() {
+        notifier.requestAuthIfNeeded()
         refreshCodex()
         refreshClaude()
         scheduleCodex()
@@ -64,6 +66,7 @@ final class UsageStore: ObservableObject {
             await MainActor.run {
                 self.codex = usage
                 self.lastRefresh = Date()
+                self.notifier.evaluate(usage, settings: self.settings)
             }
         }
     }
@@ -78,6 +81,7 @@ final class UsageStore: ObservableObject {
                 if usage.fiveHour != nil || usage.weekly != nil {
                     self.claude = usage
                     self.claudeNotice = nil
+                    self.notifier.evaluate(usage, settings: self.settings)
                 } else {
                     self.claudeNotice = usage.error
                     if self.claude == nil { self.claude = usage }

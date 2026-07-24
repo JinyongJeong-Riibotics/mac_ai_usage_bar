@@ -23,6 +23,10 @@ macOS 메뉴바에서 **Codex**와 **Claude**의 사용률(rate limit)을 보여
   선택한 창이 없으면(예: Codex 5h 부재) 다른 창으로 자동 대체.
 - **메뉴바에 표시할 서비스** — Codex / Claude 각각 on/off.
 - **갱신 주기** — Codex(로컬, 30초~5분) / Claude(3분~30분) 각각 설정.
+- **임계값 알림** — 사용률이 임계값(기본 90%)을 넘으면 macOS 알림. 창별로 한 번만 보내고,
+  값이 임계값−15% 아래로 내려가면 다시 무장(히스테리시스). *정식 `.app`에서만 동작.*
+- **메뉴바 색상 경고** — 임계값 이상이면 메뉴바 숫자를 빨강 + ⚠️, 한 단계 아래는 주황으로 표시.
+- **경고 임계값** — 50~95% 슬라이더. 알림·메뉴바 색상·드롭다운 진행바 색이 모두 이 값을 따른다.
 
 ## 데이터 소스
 
@@ -58,8 +62,13 @@ Sources/
     Formatting.swift    % / 리셋 시간 포매팅
   MacAIUsageBar/      SwiftUI 메뉴바 앱 (MenuBarExtra)
     App.swift           앱 진입점 (Dock 아이콘 없는 accessory 앱)
-    UsageStore.swift    두 소스 폴링 + @Published 상태
+    AppSettings.swift   설정 상태 (UserDefaults 영속) + 로그인 항목
+    UsageStore.swift    두 소스 폴링 + @Published 상태 + 백오프
+    UsageNotifier.swift 임계값 초과 시 macOS 알림
+    Severity.swift      사용률→심각도(정상/주의/경고) 및 색상 매핑
+    BarLabelView.swift  메뉴바 라벨 (이름·색상·경고 아이콘)
     MenuContentView.swift  드롭다운 UI
+    SettingsView.swift  설정 창
   usage-probe/        터미널에서 값 검증용 CLI
 ```
 
@@ -71,13 +80,23 @@ Swift 6 toolchain 필요 (Xcode 또는 CommandLineTools).
 # 값만 빠르게 확인 (CLI)
 swift run usage-probe
 
-# 메뉴바 앱 실행
+# 개발 실행 (알림/로그인 항목은 동작하지 않음 — 번들이 아니라서)
 swift run MacAIUsageBar
 ```
 
-앱은 Dock 아이콘 없이 메뉴바에만 뜬다. 종료는 드롭다운의 **Quit**.
+### 배포용 `.app` 만들기 (권장)
+
+```sh
+./scripts/build_app.sh      # release 빌드 → dist/MacAIUsageBar.app (ad-hoc 서명)
+open dist/MacAIUsageBar.app
+```
+
+`.app`은 번들 ID(`io.riibotics.MacAIUsageBar`)를 가지므로 **알림과 "부팅 시 자동 실행"이
+정상 동작**한다. `/Applications`로 드래그해 두면 로그인 항목 등록이 안정적이다.
+앱 아이콘을 넣으려면 `packaging/AppIcon.icns`를 두고 다시 빌드하면 된다.
+
+앱은 Dock 아이콘 없이 메뉴바에만 뜬다(`LSUIElement`). 종료는 드롭다운의 전원 아이콘.
 
 ## 개인용
 
-개인 맥 전용. 코드 서명/공증 없이 로컬 빌드해 사용한다.
-자동 실행을 원하면 로그인 항목에 앱 번들을 추가한다(추후 `.app` 패키징 예정).
+개인 맥 전용. Apple Developer 계정 없이 ad-hoc 서명으로 로컬 빌드해 쓴다.
