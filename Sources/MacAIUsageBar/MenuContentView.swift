@@ -1,6 +1,10 @@
 import SwiftUI
 import UsageCore
 
+/// App version string from the bundle (`CFBundleShortVersionString`), e.g.
+/// "1.2.1". Falls back to "dev" when run outside a bundle (`swift run`).
+let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var settings: AppSettings
@@ -36,6 +40,9 @@ struct MenuContentView: View {
                 .foregroundStyle(.secondary)
             Text("AI Usage")
                 .font(.headline)
+            Text("v\(appVersion)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             Spacer()
             Text(settings.displayMode.label)
                 .font(.caption2)
