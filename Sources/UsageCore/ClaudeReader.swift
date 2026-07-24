@@ -7,33 +7,52 @@ import Foundation
 /// `0600` file. The endpoint rate limits aggressively without a
 /// `claude-code/<version>` User-Agent, so poll no more than ~once per 3 minutes.
 ///
-/// We deliberately do **not** read the login keychain. Claude Code stores tokens
-/// there by default on macOS, but another app reading that item makes macOS ask
-/// for the keychain password on every access, and measurements on a machine that
-/// had both showed the keychain copy going a month stale while the file stayed
-/// current. `setupCommand` tells the user how to materialise the file instead.
+/// Where the token lives depends on the machine: Claude Code writes it to the
+/// login **keychain** by default on macOS, but on installs that also keep
+/// `~/.claude/.credentials.json` the file is what stays current (measured: on a
+/// machine with both, the keychain copy went a month stale while the file was
+/// refreshed hourly). So we read the **file first**, then fall back to the
+/// keychain via `/usr/bin/security`.
+///
+/// We shell out to `security` rather than call `SecItemCopyMatching` in-process
+/// on purpose. macOS attributes the one-time "Always Allow" to the *requesting*
+/// binary. `security` has a stable Apple signature, so that grant persists
+/// forever; our ad-hoc app signature changes every build, so an in-process read
+/// would re-prompt after every update. This is how other menu-bar apps
+/// "auto-connect" to Claude Code.
 public enum ClaudeReader {
     static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
-    /// One-time command that copies Claude Code's keychain login into the file
-    /// this reader uses. Shown in the UI when the file is absent.
-    public static let setupCommand =
-        #"security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/.credentials.json && chmod 600 ~/.claude/.credentials.json"#
+    static let keychainService = "Claude Code-credentials"
 
     static var credentialsURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
     }
 
+    /// File → keychain, tagged with which one answered (for diagnostics).
+    static func loadCredentials() -> (data: Data, source: String)? {
+        if let data = try? Data(contentsOf: credentialsURL) {
+            return (data, "file")
+        }
+        if let raw = runCommand("/usr/bin/security",
+                                ["find-generic-password", "-s", keychainService, "-w"]),
+           let data = raw.data(using: .utf8) {
+            return (data, "keychain")
+        }
+        return nil
+    }
+
     /// One-line summary for `usage-probe`. Reveals no token material.
     public static func diagnosticCredentialSource() -> String {
-        guard let data = try? Data(contentsOf: credentialsURL) else {
-            return "~/.claude/.credentials.json 없음 (아래 명령으로 생성)\n    \(setupCommand)"
+        guard let (data, source) = loadCredentials() else {
+            return "파일·키체인 어디에도 없음 — 해당 PC에서 `claude` 로그인 필요"
         }
         guard parseToken(from: data) != nil else {
-            return "파일은 있으나 토큰을 해석하지 못함 — claude 재로그인 필요"
+            return "\(source)에서 읽었으나 토큰을 해석하지 못함 — claude 재로그인 필요"
         }
-        var line = "~/.claude/.credentials.json 에서 읽음"
+        let where_ = source == "file" ? "~/.claude/.credentials.json" : "키체인(/usr/bin/security)"
+        var line = "\(where_) 에서 읽음"
         if let expiry = expiresAt(from: data) {
             let hours = expiry.timeIntervalSinceNow / 3600
             line += hours > 0
@@ -46,7 +65,7 @@ public enum ClaudeReader {
     /// The token is read fresh on every call so we always use the value Claude
     /// Code most recently refreshed, and it never lives anywhere but memory.
     static func accessToken() -> String? {
-        guard let data = try? Data(contentsOf: credentialsURL) else { return nil }
+        guard let (data, _) = loadCredentials() else { return nil }
         return parseToken(from: data)
     }
 
@@ -121,11 +140,11 @@ public enum ClaudeReader {
 
     /// Synchronous fetch (blocks the calling thread). Call off the main thread.
     public static func fetch(timeout: TimeInterval = 15) -> ProviderUsage {
-        guard let data = try? Data(contentsOf: credentialsURL) else {
-            return failure("~/.claude/.credentials.json 없음 — 터미널에서 한 번 실행:\n\(setupCommand)")
+        guard let (data, _) = loadCredentials() else {
+            return failure("Claude 인증 정보를 찾지 못함 — 해당 PC에서 `claude` 로그인 필요")
         }
         guard let token = parseToken(from: data) else {
-            return failure("인증 파일을 해석하지 못함 — claude 재로그인 필요")
+            return failure("인증 정보를 해석하지 못함 — claude 재로그인 필요")
         }
 
         let response = HTTP.get(usageURL, headers: [

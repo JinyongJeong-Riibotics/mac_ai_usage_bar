@@ -51,9 +51,10 @@ macOS 메뉴바에서 **Codex**와 **Claude**의 사용률(rate limit)을 보여
 - **Claude**는 `User-Agent: claude-code/<version>` 헤더가 없으면 공격적으로 429가 나므로
   반드시 붙인다. 429가 나면 간격을 2배씩(최대 8배) 늘렸다가 성공하면 원복하는 백오프가 있고,
   차단 중에도 마지막 정상값을 지우지 않고 경고만 표시한다.
-  - macOS의 Claude Code는 기본적으로 토큰을 **로그인 키체인**에 넣는다. 앱은 키체인을 읽지
-    않으므로(다른 앱이 그 항목을 읽으면 접근할 때마다 키체인 암호를 묻는다) 파일이 없으면
-    아래 "문제 해결"의 일회성 명령으로 파일을 만들어야 한다.
+  - macOS의 Claude Code는 기본적으로 토큰을 **로그인 키체인**에 넣는다. 앱은 파일이 없으면
+    Apple 서명 도구 `/usr/bin/security`를 통해 그 키체인 항목을 읽는다. 처음 한 번
+    시스템이 접근을 물으면 **"항상 허용"**을 누르면 되고, 이후로는 앱을 업데이트해도
+    다시 묻지 않는다(자세한 이유는 "문제 해결" 참고).
 
 ## 갱신 구조 정리
 
@@ -171,19 +172,26 @@ Apple Developer 계정($99/년) 없이 ad-hoc 서명만 했기 때문에 **공�
 /Applications/MacAIUsageBar.app/Contents/MacOS/usage-probe
 ```
 
-### Claude이 "`~/.claude/.credentials.json` 없음"으로 나온다
+### Claude 연결과 키체인 대화상자
 
-macOS의 Claude Code는 토큰을 기본적으로 **로그인 키체인**에 넣는다. 앱은 키체인을 읽지
-않으므로(읽으면 접근할 때마다 키체인 암호를 묻는다) 그 PC에서 **한 번만** 아래를 실행해
-CLI 로그인을 파일로 내보낸다:
+앱은 Claude 토큰을 이 순서로 찾는다:
+
+1. `~/.claude/.credentials.json` (있으면 그대로 사용, 대화상자 없음)
+2. 없으면 `/usr/bin/security`로 **로그인 키체인**의 `Claude Code-credentials` 항목을 읽는다.
+
+2번의 경우 macOS가 처음 한 번 접근을 묻는다. **"항상 허용"**을 누르면 그 뒤로는 뜨지 않는다.
+
+키체인 항목은 어떤 코드 서명이 접근을 허용받았는지로 보호되는데, macOS는 그 허용을
+**요청한 바이너리**에 귀속시킨다. 앱이 직접(in-process) 읽으면 ad-hoc 서명이라 업데이트마다
+신원이 바뀌어 매번 다시 묻는다. 그래서 신원이 고정된 Apple 서명 도구 `/usr/bin/security`를
+거쳐 읽는다 — "항상 허용" 한 번이 앱 업데이트와 무관하게 영구히 유지된다.
+
+대화상자조차 원치 않으면, 그 PC에서 한 번 아래를 실행해 파일을 만들면 이후 1번 경로만 탄다:
 
 ```sh
 security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/.credentials.json
 chmod 600 ~/.claude/.credentials.json
 ```
-
-이후로는 Claude Code가 이 파일을 갱신하므로 다시 할 필요가 없다. 참고로 파일과 키체인이
-둘 다 있는 맥에서 측정해 보면 **파일 쪽이 갱신되고 키체인 사본은 방치**된다.
 
 ### "토큰 만료됨"이 나온다
 
