@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 import UsageCore
 
 @MainActor
@@ -15,27 +16,65 @@ final class UsageStore: ObservableObject {
     private var claudeTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
+    /// `.onAppear` on the dropdown fires every time the menu opens, so guard the
+    /// one-time setup (timers, subscriptions, wake observer) against re-running
+    /// — otherwise each open stacked another timer and another auth request.
+    private var didStart = false
+
     // Multiplies the Claude interval after a 429 so we back off automatically,
     // resetting to 1 on the next success. Capped so we never stall forever.
     private var claudeBackoff: Double = 1
     private let maxBackoff: Double = 8
 
+    /// Called from the menu's `.onAppear`. First call wires everything up; every
+    /// call (including reopening the menu) refreshes, so the numbers are current
+    /// the moment the user looks at them.
     func start() {
-        notifier.requestAuthIfNeeded()
-        refreshCodex()
-        refreshClaude()
+        if !didStart {
+            didStart = true
+            notifier.requestAuthIfNeeded()
+            scheduleCodex()
+            scheduleClaude()
+            observeWake()
+
+            // Reschedule whenever the user changes an interval in Settings.
+            settings.$codexInterval
+                .dropFirst()
+                .sink { [weak self] _ in Task { @MainActor in self?.scheduleCodex() } }
+                .store(in: &cancellables)
+            settings.$claudeInterval
+                .dropFirst()
+                .sink { [weak self] _ in Task { @MainActor in self?.scheduleClaude() } }
+                .store(in: &cancellables)
+        }
+        refreshAll()
+    }
+
+    /// Timers don't fire while the Mac is asleep and don't catch up promptly on
+    /// wake, so after opening the lid the menu bar showed the pre-sleep value
+    /// until the next scheduled fire. Refresh on wake and restart the cadence
+    /// from now. The network is often not up yet at the wake instant, so also
+    /// retry shortly after — the first attempt may fall back to stale local logs.
+    private func observeWake() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleWake() }
+        }
+    }
+
+    private func handleWake() {
+        // Restart the cadence from now, then refresh — immediately and a couple
+        // of times over the next ~15s, since Wi-Fi/VPN often reconnects a few
+        // seconds after wake and the first attempt falls back to stale local logs.
         scheduleCodex()
         scheduleClaude()
-
-        // Reschedule whenever the user changes an interval in Settings.
-        settings.$codexInterval
-            .dropFirst()
-            .sink { [weak self] _ in Task { @MainActor in self?.scheduleCodex() } }
-            .store(in: &cancellables)
-        settings.$claudeInterval
-            .dropFirst()
-            .sink { [weak self] _ in Task { @MainActor in self?.scheduleClaude() } }
-            .store(in: &cancellables)
+        refreshAll()
+        for delay in [4.0, 12.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.refreshAll()
+            }
+        }
     }
 
     func refreshAll() {
@@ -64,9 +103,19 @@ final class UsageStore: ObservableObject {
         Task.detached(priority: .utility) {
             let usage = CodexReader.fetch()
             await MainActor.run {
-                self.codex = usage
                 self.lastRefresh = Date()
-                self.notifier.evaluate(usage, settings: self.settings)
+                // A live fetch has no error; a fallback to stale local logs sets
+                // one. Right after wake the network is often down, so the first
+                // fetch falls back — don't let that overwrite a good live value
+                // with an old number (this is why 100% flashed on wake). Adopt
+                // the fallback only when we have nothing better to show.
+                let isLive = usage.error == nil
+                let haveGoodValue = self.codex?.error == nil
+                    && (self.codex?.fiveHour != nil || self.codex?.weekly != nil)
+                if isLive || !haveGoodValue {
+                    self.codex = usage
+                    self.notifier.evaluate(usage, settings: self.settings)
+                }
             }
         }
     }
