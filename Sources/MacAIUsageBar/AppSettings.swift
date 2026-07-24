@@ -24,8 +24,9 @@ final class AppSettings: ObservableObject {
     @Published var launchAtLogin: Bool { didSet { applyLoginItem() } }
     @Published var loginItemError: String?
 
-    // Update intervals in seconds. Codex reads local files so it can be frequent;
-    // the Claude endpoint rate-limits hard, so it is clamped to a safe minimum.
+    // Update intervals in seconds. Both providers now hit a network endpoint, so
+    // each is clamped to a minimum: Codex's is mild, the Claude endpoint rate
+    // limits hard and needs the wider floor.
     @Published var codexInterval: Double { didSet { defaults.set(codexInterval, forKey: Keys.codexInterval) } }
     @Published var claudeInterval: Double { didSet { defaults.set(claudeInterval, forKey: Keys.claudeInterval) } }
 
@@ -38,6 +39,7 @@ final class AppSettings: ObservableObject {
     var cautionThreshold: Double { max(0, warnThreshold - 15) }
 
     static let claudeMinInterval: Double = 180
+    static let codexMinInterval: Double = 60
 
     private let defaults = UserDefaults.standard
 
@@ -60,7 +62,7 @@ final class AppSettings: ObservableObject {
         showClaude = defaults.object(forKey: Keys.showClaude) as? Bool ?? true
         let codex = defaults.object(forKey: Keys.codexInterval) as? Double ?? 60
         let claude = defaults.object(forKey: Keys.claudeInterval) as? Double ?? 300
-        codexInterval = max(15, codex)
+        codexInterval = max(AppSettings.codexMinInterval, codex)
         claudeInterval = max(AppSettings.claudeMinInterval, claude)
         notificationsEnabled = defaults.object(forKey: Keys.notificationsEnabled) as? Bool ?? true
         colorMenuBar = defaults.object(forKey: Keys.colorMenuBar) as? Bool ?? true

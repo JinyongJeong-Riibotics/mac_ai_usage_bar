@@ -45,7 +45,7 @@ final class UsageStore: ObservableObject {
 
     private func scheduleCodex() {
         codexTimer?.invalidate()
-        let interval = max(15, settings.codexInterval)
+        let interval = max(AppSettings.codexMinInterval, settings.codexInterval)
         codexTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshCodex() }
         }
@@ -62,7 +62,7 @@ final class UsageStore: ObservableObject {
 
     func refreshCodex() {
         Task.detached(priority: .utility) {
-            let usage = CodexReader.latest()
+            let usage = CodexReader.fetch()
             await MainActor.run {
                 self.codex = usage
                 self.lastRefresh = Date()
