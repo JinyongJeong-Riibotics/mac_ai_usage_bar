@@ -82,10 +82,22 @@ jobs:
           ## 설치
 
           1. 아래 \`MacAIUsageBar-$VERSION.zip\` 다운로드 → 압축 해제 → \`MacAIUsageBar.app\`을 \`/Applications\`로 이동
-          2. ad-hoc 서명이라 Gatekeeper가 첫 실행을 막는다. 둘 중 하나로 해제:
-             - Finder에서 **우클릭 → 열기 → 열기**
-             - 또는 터미널에서 \`xattr -dr com.apple.quarantine /Applications/MacAIUsageBar.app\`
+          2. **Gatekeeper 해제** — 터미널에서 아래 한 줄:
+             \`\`\`sh
+             xattr -dr com.apple.quarantine /Applications/MacAIUsageBar.app
+             \`\`\`
           3. Dock 아이콘 없이 메뉴바에만 뜬다. 종료는 드롭다운의 전원 아이콘.
+
+          ### "Apple은 악성 코드가 없음을 확인할 수 없습니다"가 뜬다면
+
+          정상이다. Apple Developer 계정 없이 ad-hoc 서명만 한 앱이라 **공증(notarization)이
+          없어서** 나는 경고이지, 앱이 손상된 게 아니다. 위 2번 명령으로 해제하면 된다.
+
+          터미널을 쓰지 않겠다면: 앱을 한 번 실행해 경고를 띄운 뒤
+          **시스템 설정 → 개인정보 보호 및 보안** → 아래로 스크롤 → **"확인 없이 열기"**.
+          (macOS 15부터는 Finder에서 우클릭 → 열기로는 더 이상 우회되지 않는다.)
+
+          Apple Silicon(arm64) 전용이다. Intel Mac에서는 동작하지 않는다.
           NOTES
 
       - name: Publish GitHub Release
