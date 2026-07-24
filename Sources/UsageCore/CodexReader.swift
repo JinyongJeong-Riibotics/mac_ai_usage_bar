@@ -41,7 +41,12 @@ public enum CodexReader {
             last = rl
         }
         guard let rl = last else { return nil }
+        return parseRateLimits(rl)
+    }
 
+    /// Maps a raw `rate_limits` object into 5h / weekly windows by
+    /// `window_minutes` (300 = 5h, 10080 = weekly). Pure — unit-testable.
+    static func parseRateLimits(_ rl: [String: Any]) -> (five: RateWindow?, week: RateWindow?) {
         var five: RateWindow?
         var week: RateWindow?
         for key in ["primary", "secondary"] {

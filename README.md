@@ -97,6 +97,50 @@ open dist/MacAIUsageBar.app
 
 앱은 Dock 아이콘 없이 메뉴바에만 뜬다(`LSUIElement`). 종료는 드롭다운의 전원 아이콘.
 
+## CI / 릴리즈
+
+macOS 러너는 비싸므로(러너 분 10배) **패키징은 사람이 릴리즈를 요청할 때만** 돈다.
+평소 PR에서는 테스트만 돌고, 설치는 Releases에서 받아서 한다.
+
+| 워크플로 | 트리거 | 하는 일 |
+|---|---|---|
+| `ci.yml` | PR · master push | `swift build` + `swift test` (캐시로 단축). 문서-only 변경은 스킵 |
+| `release.yml` | **수동 실행** · `v*` 태그 push | `.app` 빌드 → zip → **GitHub Release에 첨부**(영구) |
+
+### 릴리즈 만들기 (배포자)
+
+GitHub → **Actions → Release → Run workflow** → 버전(예: `0.2.0`) 입력 → 실행.
+
+그러면 현재 커밋에 `v0.2.0` 태그를 만들고, `.app`을 빌드해
+`MacAIUsageBar-0.2.0.zip`을 릴리즈에 첨부한다. 릴리즈 노트에는 설치 안내와
+자동 생성된 변경 내역이 함께 들어간다. 같은 버전이 이미 있으면 빌드 전에 실패한다.
+
+터미널에서 태그를 직접 밀어도 동일하게 동작한다:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+### 설치하기 (사용자)
+
+1. [Releases](../../releases)에서 `MacAIUsageBar-<버전>.zip` 다운로드 → 압축 해제 →
+   `MacAIUsageBar.app`을 `/Applications`로 이동.
+2. ad-hoc 서명이라 Gatekeeper가 처음 실행을 막는다. **우클릭 → 열기 → 열기**로 한 번
+   허용하거나:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/MacAIUsageBar.app
+   ```
+3. 메뉴바에만 뜬다(Dock 아이콘 없음). 종료는 드롭다운의 전원 아이콘.
+
+### 로컬에서 테스트 돌리기
+
+`xcode-select`가 Command Line Tools를 가리키면 `XCTest`가 없어 `swift test`가 실패한다:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+# 또는 영구 전환: sudo xcode-select -s /Applications/Xcode.app
+```
+
 ## 개인용
 
 개인 맥 전용. Apple Developer 계정 없이 ad-hoc 서명으로 로컬 빌드해 쓴다.

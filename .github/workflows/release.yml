@@ -1,0 +1,102 @@
+name: Release
+
+# 온디맨드 패키징. 평소(PR/master)에는 절대 돌지 않고, 사람이 릴리즈를 요청할 때만
+# .app을 빌드해 GitHub Release에 zip으로 영구 첨부한다. 설치는 Releases에서 내려받아 한다.
+#
+#   · 수동 실행(Actions → Release → Run workflow): 버전을 입력하면 v<버전> 태그를
+#     현재 커밋에 만들고 릴리즈까지 발행한다. ← 기본 사용 방식
+#   · `v*` 태그 push: 태그를 직접 밀었을 때도 동일하게 릴리즈를 발행한다.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '버전 (예: 0.2.0). v<버전> 태그와 릴리즈가 생성된다'
+        required: true
+      prerelease:
+        description: '프리릴리즈로 표시'
+        type: boolean
+        default: false
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 태그 push면 태그 이름이 곧 버전, 수동 실행이면 입력값에서 만든다.
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v${INPUT_VERSION#v}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "릴리즈 대상: $TAG (버전 $VERSION)"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+
+      # 빌드에 러너 분을 쓰기 전에 중복 릴리즈부터 걸러낸다.
+      - name: Guard against duplicate release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::릴리즈 $TAG 가 이미 존재한다. 버전을 올려서 다시 실행할 것."
+            exit 1
+          fi
+
+      - name: Build .app
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./scripts/build_app.sh
+
+      - name: Zip .app
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          ditto -c -k --keepParent \
+            dist/MacAIUsageBar.app \
+            "MacAIUsageBar-$VERSION.zip"
+
+      # 설치 안내를 릴리즈 노트 맨 위에 붙인다. 그 아래로는 --generate-notes가
+      # 커밋/PR 기반 변경 내역을 자동으로 이어 붙인다.
+      - name: Compose release notes
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          cat > RELEASE_NOTES.md <<NOTES
+          ## 설치
+
+          1. 아래 \`MacAIUsageBar-$VERSION.zip\` 다운로드 → 압축 해제 → \`MacAIUsageBar.app\`을 \`/Applications\`로 이동
+          2. ad-hoc 서명이라 Gatekeeper가 첫 실행을 막는다. 둘 중 하나로 해제:
+             - Finder에서 **우클릭 → 열기 → 열기**
+             - 또는 터미널에서 \`xattr -dr com.apple.quarantine /Applications/MacAIUsageBar.app\`
+          3. Dock 아이콘 없이 메뉴바에만 뜬다. 종료는 드롭다운의 전원 아이콘.
+          NOTES
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          ARGS=(--title "$TAG" --target "$GITHUB_SHA"
+                --notes-file RELEASE_NOTES.md --generate-notes)
+          if [ "$PRERELEASE" = "true" ]; then ARGS+=(--prerelease); fi
+          gh release create "$TAG" "MacAIUsageBar-$VERSION.zip" "${ARGS[@]}"
+          echo "✅ https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
