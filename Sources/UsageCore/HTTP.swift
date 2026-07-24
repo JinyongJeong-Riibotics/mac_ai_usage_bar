@@ -49,3 +49,28 @@ func readJSONFile(_ url: URL) -> [String: Any]? {
     else { return nil }
     return obj
 }
+
+/// Runs a command and returns its trimmed stdout, or nil on non-zero exit / no
+/// output. Used to read a login-keychain item through Apple's `/usr/bin/security`
+/// tool: because `security` has a stable Apple code signature, the one-time
+/// "Always Allow" the user grants sticks across our (ad-hoc, ever-changing) app
+/// signature — reading the item in-process would re-prompt after every update.
+func runCommand(_ path: String, _ args: [String], timeout: TimeInterval = 10) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = args
+    let out = Pipe()
+    process.standardOutput = out
+    process.standardError = FileHandle.nullDevice
+    do { try process.run() } catch { return nil }
+
+    // Guard against a hung child (e.g. a keychain dialog nobody answers).
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning && Date() < deadline { usleep(20_000) }
+    if process.isRunning { process.terminate(); return nil }
+
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    let s = String(data: data, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return (process.terminationStatus == 0 && !s.isEmpty) ? s : nil
+}
