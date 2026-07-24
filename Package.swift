@@ -14,5 +14,9 @@ let package = Package(
             name: "usage-probe",
             dependencies: ["UsageCore"]
         ),
+        .testTarget(
+            name: "UsageCoreTests",
+            dependencies: ["UsageCore"]
+        ),
     ]
 )
