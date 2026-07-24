@@ -10,6 +10,8 @@ struct SettingsView: View {
         Form {
             Section("일반") {
                 Toggle("부팅 시 자동 실행", isOn: $settings.launchAtLogin)
+                    .toggleStyle(.switch)
+                    .tint(.blue)
                 if let err = settings.loginItemError {
                     Text(err)
                         .font(.caption)
@@ -45,7 +47,11 @@ struct SettingsView: View {
 
             Section("메뉴바에 표시할 서비스") {
                 Toggle("Codex", isOn: $settings.showCodex)
+                    .toggleStyle(.switch)
+                    .tint(.blue)
                 Toggle("Claude", isOn: $settings.showClaude)
+                    .toggleStyle(.switch)
+                    .tint(.blue)
             }
         }
         .formStyle(.grouped)
