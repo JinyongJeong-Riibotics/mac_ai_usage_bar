@@ -12,14 +12,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct MacAIUsageBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var store = UsageStore()
+    @StateObject private var settings = AppSettings.shared
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContentView(store: store)
+            MenuContentView(store: store, settings: settings)
                 .onAppear { store.start() }
         } label: {
-            Text(store.barTitle)
+            BarLabelView(store: store, settings: settings)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(settings: settings)
+        }
     }
 }

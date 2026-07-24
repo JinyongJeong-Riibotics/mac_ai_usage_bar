@@ -1,34 +1,61 @@
 import Foundation
+import Combine
 import UsageCore
 
 @MainActor
 final class UsageStore: ObservableObject {
     @Published var codex: ProviderUsage?
     @Published var claude: ProviderUsage?
+    @Published var claudeNotice: String?
     @Published var lastRefresh: Date?
 
-    // Codex reads local files (cheap). The Claude endpoint rate limits hard, so
-    // it is polled far less often.
-    private let codexInterval: TimeInterval = 60
-    private let claudeInterval: TimeInterval = 300
-
+    private let settings = AppSettings.shared
     private var codexTimer: Timer?
     private var claudeTimer: Timer?
+    private var cancellables = Set<AnyCancellable>()
+
+    // Multiplies the Claude interval after a 429 so we back off automatically,
+    // resetting to 1 on the next success. Capped so we never stall forever.
+    private var claudeBackoff: Double = 1
+    private let maxBackoff: Double = 8
 
     func start() {
         refreshCodex()
         refreshClaude()
-        codexTimer = Timer.scheduledTimer(withTimeInterval: codexInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshCodex() }
-        }
-        claudeTimer = Timer.scheduledTimer(withTimeInterval: claudeInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshClaude() }
-        }
+        scheduleCodex()
+        scheduleClaude()
+
+        // Reschedule whenever the user changes an interval in Settings.
+        settings.$codexInterval
+            .dropFirst()
+            .sink { [weak self] _ in Task { @MainActor in self?.scheduleCodex() } }
+            .store(in: &cancellables)
+        settings.$claudeInterval
+            .dropFirst()
+            .sink { [weak self] _ in Task { @MainActor in self?.scheduleClaude() } }
+            .store(in: &cancellables)
     }
 
     func refreshAll() {
         refreshCodex()
         refreshClaude()
+    }
+
+    private func scheduleCodex() {
+        codexTimer?.invalidate()
+        let interval = max(15, settings.codexInterval)
+        codexTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshCodex() }
+        }
+    }
+
+    private func scheduleClaude() {
+        claudeTimer?.invalidate()
+        let base = max(AppSettings.claudeMinInterval, settings.claudeInterval)
+        let interval = base * claudeBackoff
+        claudeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refreshClaude() }
+        }
     }
 
     func refreshCodex() {
@@ -45,20 +72,55 @@ final class UsageStore: ObservableObject {
         Task.detached(priority: .utility) {
             let usage = ClaudeReader.fetch()
             await MainActor.run {
-                self.claude = usage
                 self.lastRefresh = Date()
+                // Don't let a transient error (e.g. 429) erase the last good
+                // reading — keep showing it and surface the error as a notice.
+                if usage.fiveHour != nil || usage.weekly != nil {
+                    self.claude = usage
+                    self.claudeNotice = nil
+                } else {
+                    self.claudeNotice = usage.error
+                    if self.claude == nil { self.claude = usage }
+                }
+                self.handleClaudeResult(usage)
             }
         }
     }
 
-    /// Compact menu-bar title: each provider's most-constrained window percent.
-    var barTitle: String {
-        func peak(_ u: ProviderUsage?) -> String {
-            guard let u else { return "–" }
-            let pcts = [u.fiveHour?.usedPercent, u.weekly?.usedPercent].compactMap { $0 }
-            guard let m = pcts.max() else { return "–" }
-            return formatPercent(m)
+    /// On a 429 we grow the backoff and reschedule further out; any other outcome
+    /// resets it. Claude uses a non-repeating timer so each fire re-arms with the
+    /// current (possibly backed-off) interval.
+    private func handleClaudeResult(_ usage: ProviderUsage) {
+        let rateLimited = (usage.error?.contains("429") ?? false)
+            || (usage.error?.contains("rate limited") ?? false)
+        if rateLimited {
+            claudeBackoff = min(maxBackoff, claudeBackoff * 2)
+        } else {
+            claudeBackoff = 1
         }
-        return "Cx \(peak(codex)) · Cl \(peak(claude))"
+        scheduleClaude()
+    }
+
+    /// Human-readable current effective Claude cadence, for the settings screen.
+    var effectiveClaudeInterval: Double {
+        max(AppSettings.claudeMinInterval, settings.claudeInterval) * claudeBackoff
+    }
+
+    var isClaudeBackingOff: Bool { claudeBackoff > 1 }
+}
+
+/// Displayed percentage for a window given the used/remaining preference.
+func displayedPercent(usedPercent: Double, mode: DisplayMode) -> Double {
+    mode == .used ? usedPercent : max(0, 100 - usedPercent)
+}
+
+/// The window a bar/label should show for a provider, honoring the preferred
+/// window but falling back to the other when the preferred one is absent
+/// (Codex frequently omits its 5h window in the local logs).
+func preferredWindow(_ usage: ProviderUsage?, _ pref: BarWindow) -> RateWindow? {
+    guard let usage else { return nil }
+    switch pref {
+    case .fiveHour: return usage.fiveHour ?? usage.weekly
+    case .weekly: return usage.weekly ?? usage.fiveHour
     }
 }
