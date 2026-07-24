@@ -26,6 +26,11 @@ public enum CodexReader {
         return files.sorted { $0.1 > $1.1 }.prefix(limit).map { ($0.0, $0.1) }
     }
 
+    /// Number of rollout logs the scan can see, for `usage-probe` diagnostics.
+    public static func diagnosticSessionCount(scanLimit: Int = 40) -> Int {
+        rolloutFilesNewestFirst(limit: scanLimit).count
+    }
+
     /// Last `rate_limits` sample written in a single session file (newest first
     /// within the file), mapped into the two windows it contains.
     static func windows(in file: URL) -> (five: RateWindow?, week: RateWindow?)? {

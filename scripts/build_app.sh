@@ -15,6 +15,9 @@ CONFIG="release"
 
 echo "▶︎ swift build ($CONFIG)…"
 swift build -c "$CONFIG" --product "$APP_NAME"
+# usage-probe는 앱이 실제로 무엇을 읽는지 그대로 출력하는 진단 CLI다. 번들 안에
+# 같이 넣어두면 문제가 생긴 맥에서 추가 다운로드 없이 바로 돌려볼 수 있다.
+swift build -c "$CONFIG" --product usage-probe
 BINDIR="$(swift build -c "$CONFIG" --show-bin-path)"
 
 APP="dist/$APP_NAME.app"
@@ -22,6 +25,7 @@ echo "▶︎ 번들 조립: $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINDIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
+cp "$BINDIR/usage-probe" "$APP/Contents/MacOS/usage-probe"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
