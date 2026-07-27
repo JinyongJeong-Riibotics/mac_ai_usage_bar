@@ -14,9 +14,37 @@ enum HTTP {
     static func get(_ url: URL,
                     headers: [String: String],
                     timeout: TimeInterval) -> Response {
+        send(url, method: "GET", headers: headers, body: nil, timeout: timeout)
+    }
+
+    /// Form-encoded POST, used for the OAuth token refresh.
+    static func postForm(_ url: URL,
+                         fields: [String: String],
+                         headers: [String: String] = [:],
+                         timeout: TimeInterval) -> Response {
+        let body = fields.map { key, value in
+            "\(formEncode(key))=\(formEncode(value))"
+        }.joined(separator: "&").data(using: .utf8)
+        var h = headers
+        h["Content-Type"] = "application/x-www-form-urlencoded"
+        return send(url, method: "POST", headers: h, body: body, timeout: timeout)
+    }
+
+    private static func formEncode(_ s: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+
+    private static func send(_ url: URL,
+                             method: String,
+                             headers: [String: String],
+                             body: Data?,
+                             timeout: TimeInterval) -> Response {
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = method
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        request.httpBody = body
         request.timeoutInterval = timeout
 
         let box = ResponseBox()

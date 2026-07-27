@@ -77,6 +77,95 @@ public enum ClaudeReader {
         return ms > 0 ? Date(timeIntervalSince1970: ms / 1000) : nil
     }
 
+    // MARK: - Token refresh
+
+    /// Public OAuth client id Claude Code uses (extracted from the CLI). The
+    /// refresh grant needs it alongside the refresh token.
+    static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    /// `platform.claude.com` is Cloudflare-gated against non-browser callers;
+    /// `api.anthropic.com` serves the same token grant and accepts our request.
+    static let tokenURL = URL(string: "https://api.anthropic.com/v1/oauth/token")!
+
+    /// Refresh the access token in `~/.claude/.credentials.json` when it is near
+    /// expiry, so the app keeps working without the user running `claude`.
+    ///
+    /// We do this **only when credentials live in the file** — never when they
+    /// came from the keychain. The refresh token rotates: refreshing invalidates
+    /// the previous one, so if we refreshed the keychain's token out from under
+    /// Claude Code, its own next run could be forced to re-login. Owning the file
+    /// copy keeps our rotation isolated from Claude Code's keychain copy.
+    ///
+    /// Returns the fresh access token when a refresh happened, else nil.
+    @discardableResult
+    static func refreshIfNeeded(force: Bool = false, timeout: TimeInterval = 15) -> String? {
+        // Only the file is safe to rotate (see above).
+        guard let data = try? Data(contentsOf: credentialsURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var oauth = obj["claudeAiOauth"] as? [String: Any],
+              let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty
+        else { return nil }
+
+        // Refresh only within 10 min of expiry (or when forced by a 401), so we
+        // don't rotate needlessly and race Claude Code's own refresh-on-run.
+        if !force, let expiry = expiresAt(from: data),
+           expiry.timeIntervalSinceNow > 600 { return nil }
+
+        let response = HTTP.postForm(tokenURL, fields: [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": oauthClientID,
+        ], headers: ["Accept": "application/json"], timeout: timeout)
+
+        guard response.status == 200, let body = response.data,
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let newAccess = json["access_token"] as? String, !newAccess.isEmpty
+        else { return nil }
+
+        guard let merged = mergedCredentials(original: obj, oldOAuth: oauth,
+                                             response: json, now: Date()) else { return nil }
+        writeBack(merged)
+        return newAccess
+    }
+
+    /// Pure: fold the token response into the existing credentials JSON,
+    /// preserving every other field (both top-level and inside `claudeAiOauth`),
+    /// and return the bytes to persist. Returns nil if the response lacks a token.
+    /// Split out from the file write so it can be unit-tested.
+    static func mergedCredentials(original: [String: Any],
+                                  oldOAuth: [String: Any],
+                                  response: [String: Any],
+                                  now: Date) -> Data? {
+        guard let newAccess = response["access_token"] as? String, !newAccess.isEmpty else {
+            return nil
+        }
+        var oauth = oldOAuth
+        oauth["accessToken"] = newAccess
+        if let newRefresh = response["refresh_token"] as? String, !newRefresh.isEmpty {
+            oauth["refreshToken"] = newRefresh
+        }
+        if let expiresIn = response["expires_in"] as? Double {
+            oauth["expiresAt"] = Int(now.timeIntervalSince1970 * 1000 + expiresIn * 1000)
+        }
+        var merged = original
+        merged["claudeAiOauth"] = oauth
+        return try? JSONSerialization.data(withJSONObject: merged)
+    }
+
+    /// Atomically rewrite the credentials file, preserving `0600` permissions. A
+    /// partial write here would lock the user out, so we write a temp file and
+    /// rename over the original.
+    static func writeBack(_ data: Data) {
+        let tmp = credentialsURL.appendingPathExtension("tmp")
+        do {
+            try data.write(to: tmp, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                  ofItemAtPath: tmp.path)
+            _ = try FileManager.default.replaceItemAt(credentialsURL, withItemAt: tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+        }
+    }
+
     /// `{"claudeAiOauth": {"accessToken": …}}`, tolerating a flat shape or a
     /// bare token string.
     static func parseToken(from data: Data) -> String? {
@@ -140,6 +229,10 @@ public enum ClaudeReader {
 
     /// Synchronous fetch (blocks the calling thread). Call off the main thread.
     public static func fetch(timeout: TimeInterval = 15) -> ProviderUsage {
+        // Proactively refresh a file-based token that's about to expire, so a
+        // scheduled poll keeps working without the user ever touching a terminal.
+        refreshIfNeeded(timeout: timeout)
+
         guard let (data, _) = loadCredentials() else {
             return failure("Claude 인증 정보를 찾지 못함 — 해당 PC에서 `claude` 로그인 필요")
         }
@@ -147,30 +240,58 @@ public enum ClaudeReader {
             return failure("인증 정보를 해석하지 못함 — claude 재로그인 필요")
         }
 
+        let usage = requestUsage(token: token, timeout: timeout)
+
+        // A 401/403 despite a "valid-looking" token means it was revoked or the
+        // clock was off; try one forced refresh and repeat before giving up.
+        if case let .authFailed(status) = usage,
+           let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
+            let retry = requestUsage(token: refreshed, timeout: timeout)
+            return retry.toProviderUsage(dataForExpiry: try? Data(contentsOf: credentialsURL),
+                                         lastStatus: status)
+        }
+        return usage.toProviderUsage(dataForExpiry: data, lastStatus: nil)
+    }
+
+    private enum UsageResult {
+        case ok([String: Any])
+        case authFailed(Int)
+        case rateLimited
+        case transport(String)
+        case http(Int)
+
+        func toProviderUsage(dataForExpiry: Data?, lastStatus: Int?) -> ProviderUsage {
+            switch self {
+            case let .ok(obj): return parse(obj)
+            case let .authFailed(status):
+                if let d = dataForExpiry, let expiry = expiresAt(from: d), expiry < Date() {
+                    return failure("토큰 만료 — 자동 갱신 실패. 해당 PC에서 `claude` 재로그인 필요")
+                }
+                return failure("인증 거부됨 (HTTP \(status)) — claude 재로그인 필요")
+            case .rateLimited: return failure("rate limited (429) — polling too fast")
+            case let .transport(msg): return failure(msg)
+            case let .http(status): return failure("HTTP \(status)")
+            }
+        }
+    }
+
+    private static func requestUsage(token: String, timeout: TimeInterval) -> UsageResult {
         let response = HTTP.get(usageURL, headers: [
             "Authorization": "Bearer \(token)",
             "User-Agent": "claude-code/\(claudeCodeVersion())",
             "Content-Type": "application/json",
         ], timeout: timeout)
 
-        if let transport = response.transportError { return failure(transport) }
-
+        if let transport = response.transportError { return .transport(transport) }
         switch response.status {
         case 200:
             guard let data = response.data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return failure("응답을 해석하지 못함") }
-            return parse(obj)
-        case 401, 403:
-            // Almost always an expired token the CLI has not refreshed yet.
-            if let expiry = expiresAt(from: data), expiry < Date() {
-                return failure("토큰 만료됨 — claude를 한 번 실행해 갱신하세요")
-            }
-            return failure("인증 거부됨 (HTTP \(response.status)) — claude 재로그인 필요")
-        case 429:
-            return failure("rate limited (429) — polling too fast")
-        default:
-            return failure("HTTP \(response.status)")
+            else { return .http(200) }
+            return .ok(obj)
+        case 401, 403: return .authFailed(response.status)
+        case 429: return .rateLimited
+        default: return .http(response.status)
         }
     }
 
