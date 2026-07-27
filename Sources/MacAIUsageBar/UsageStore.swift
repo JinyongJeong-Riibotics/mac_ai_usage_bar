@@ -5,6 +5,11 @@ import UsageCore
 
 @MainActor
 final class UsageStore: ObservableObject {
+    /// Shared instance so the app delegate can `start()` polling at launch,
+    /// independent of any view's lifecycle. The menu bar item may sit untouched
+    /// for hours; polling and token refresh must not wait for a first click.
+    static let shared = UsageStore()
+
     @Published var codex: ProviderUsage?
     @Published var claude: ProviderUsage?
     @Published var claudeNotice: String?
@@ -16,9 +21,9 @@ final class UsageStore: ObservableObject {
     private var claudeTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
 
-    /// `.onAppear` on the dropdown fires every time the menu opens, so guard the
-    /// one-time setup (timers, subscriptions, wake observer) against re-running
-    /// — otherwise each open stacked another timer and another auth request.
+    /// Guards the one-time setup (timers, subscriptions, wake observer) against
+    /// re-running: `start()` is called at launch and again on every menu open,
+    /// and without this each call stacked another timer and another auth request.
     private var didStart = false
 
     // Multiplies the Claude interval after a 429 so we back off automatically,
@@ -26,8 +31,9 @@ final class UsageStore: ObservableObject {
     private var claudeBackoff: Double = 1
     private let maxBackoff: Double = 8
 
-    /// Called from the menu's `.onAppear`. First call wires everything up; every
-    /// call (including reopening the menu) refreshes, so the numbers are current
+    /// Called at app launch (delegate) and from the menu's `.onAppear`. First
+    /// call wires everything up; every call (including reopening the menu)
+    /// refreshes, so the numbers are current
     /// the moment the user looks at them.
     func start() {
         if !didStart {
