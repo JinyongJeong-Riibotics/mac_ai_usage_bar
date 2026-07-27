@@ -64,7 +64,7 @@ struct MenuContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button { store.refreshAll() } label: {
+            Button { store.refreshAll(force: true) } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)

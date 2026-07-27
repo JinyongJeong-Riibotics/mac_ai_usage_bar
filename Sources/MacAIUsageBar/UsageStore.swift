@@ -67,6 +67,7 @@ final class UsageStore: ObservableObject {
         // Restart the cadence from now, then refresh — immediately and a couple
         // of times over the next ~15s, since Wi-Fi/VPN often reconnects a few
         // seconds after wake and the first attempt falls back to stale local logs.
+        // The Claude throttle below collapses these into at most one real call.
         scheduleCodex()
         scheduleClaude()
         refreshAll()
@@ -77,9 +78,11 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    func refreshAll() {
+    /// `force` (manual refresh, scheduled timer) always fetches Claude; ambient
+    /// triggers (menu open, wake retries) are throttled to avoid 429s.
+    func refreshAll(force: Bool = false) {
         refreshCodex()
-        refreshClaude()
+        refreshClaude(force: force)
     }
 
     private func scheduleCodex() {
@@ -95,7 +98,7 @@ final class UsageStore: ObservableObject {
         let base = max(AppSettings.claudeMinInterval, settings.claudeInterval)
         let interval = base * claudeBackoff
         claudeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.refreshClaude() }
+            Task { @MainActor in self?.refreshClaude(force: true) }
         }
     }
 
@@ -120,7 +123,19 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    func refreshClaude() {
+    /// Timestamp of the last Claude network fetch, for throttling.
+    private var lastClaudeFetch: Date?
+    /// The Claude endpoint 429s aggressively, so never call it more than once per
+    /// this window from ambient triggers (menu opens, wake retries). The
+    /// scheduled timer and the manual refresh button pass force=true to bypass.
+    private let claudeThrottle: TimeInterval = 60
+
+    func refreshClaude(force: Bool = false) {
+        if !force, let last = lastClaudeFetch,
+           Date().timeIntervalSince(last) < claudeThrottle {
+            return
+        }
+        lastClaudeFetch = Date()
         Task.detached(priority: .utility) {
             let usage = ClaudeReader.fetch()
             await MainActor.run {

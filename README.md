@@ -39,8 +39,14 @@ macOS 메뉴바에서 **Codex**와 **Claude**의 사용률(rate limit)을 보여
 | 인증 파일 | `~/.codex/auth.json` (0600) | `~/.claude/.credentials.json` (0600) |
 | 엔드포인트 | `GET https://chatgpt.com/backend-api/wham/usage` | `GET https://api.anthropic.com/api/oauth/usage` |
 | 헤더 | `Authorization: Bearer` + `chatgpt-account-id` | `Authorization: Bearer` + `User-Agent: claude-code/<version>` |
-| 토큰 수명 | 약 10일, Codex CLI가 갱신 | 약 8시간, Claude Code가 갱신 |
+| 토큰 수명 | 약 10일, Codex CLI가 갱신 | accessToken 약 8시간 · refreshToken 약 26일 |
+| 토큰 갱신 | Codex CLI에 위임 | **앱이 파일 사본을 직접 갱신** (아래) |
 | 최소 주기 | 60초 | 180초 (기본 5분) |
+
+Claude Code는 백그라운드에서 토큰을 갱신하지 않으므로, 앱이 파일 기반 자격증명일 때
+만료 임박(또는 401) 시 refreshToken으로 accessToken을 스스로 갱신해 파일에 원자적으로
+써넣는다(형식·권한 0600 보존). 키체인 자격증명은 회전 충돌을 피하려 갱신하지 않는다.
+자세한 내용은 "문제 해결"의 인증 유지 절 참고.
 
 - **Codex** 응답의 `rate_limit.primary_window` / `secondary_window`를 `limit_window_seconds`로
   구분한다(18000=5h, 604800=주간). Codex는 **현재 binding되는 한도만 primary로** 주므로
@@ -193,10 +199,31 @@ security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/.cred
 chmod 600 ~/.claude/.credentials.json
 ```
 
-### "토큰 만료됨"이 나온다
+### 인증이 자꾸 만료된다 / 터미널을 켜야만 유지된다
 
-Codex 토큰은 약 10일, Claude 토큰은 약 8시간마다 각 CLI가 갱신한다. 해당 PC에서
-`codex` 또는 `claude`를 한 번 실행하면 복구된다. `usage-probe`가 남은 수명을 보여준다.
+Claude accessToken은 **약 8시간** 만에 만료되는데, **Claude Code는 백그라운드에서 토큰을
+자동 갱신하지 않는다**(터미널에서 `claude`를 실행할 때만 갱신). 그래서 앱만 켜두면 8시간 뒤
+인증이 끊긴다.
+
+그래서 이 앱은 **자격증명이 `~/.claude/.credentials.json` 파일에 있을 때** refreshToken으로
+accessToken을 스스로 갱신한다(`api.anthropic.com/v1/oauth/token`). refreshToken은 약 26일
+유효하므로, 그 안에 앱이 한 번이라도 돌면 무기한 유지된다 — 터미널을 켤 필요가 없다.
+
+- **키체인 자격증명은 앱이 갱신하지 않는다.** refreshToken은 회전(rotating)식이라, 앱이
+  키체인 토큰을 갱신하면 Claude Code 자신의 refreshToken이 무효화돼 다음 `claude` 실행 때
+  재로그인을 요구할 수 있다. 그 충돌을 피하려고 파일 사본만 갱신한다.
+- 따라서 **키체인만 있는 맥에서 무인증 유지를 원하면**, 아래 "키체인 대화상자" 절의
+  일회성 명령으로 파일을 한 번 만들면 그 뒤로는 앱이 알아서 갱신한다.
+
+Codex 토큰은 약 10일이고 Codex CLI가 갱신한다. 만료되면 그 PC에서 `codex`를 한 번 실행.
+`usage-probe`가 두 토큰의 남은 수명을 보여준다.
+
+### "rate limited (429)"이 가끔 뜬다
+
+Claude 사용량 엔드포인트는 짧은 시간에 여러 번 부르면 429를 낸다. 앱은 예약된 주기(기본 5분)와
+수동 새로고침만 실제 호출하고, 메뉴를 자주 열거나 절전에서 깨어난 직후의 중복 호출은 60초
+간격으로 합쳐 429를 피한다. 429가 나도 마지막 정상값은 지우지 않고 주기를 자동으로 늘렸다가
+회복하며, 잠깐 경고만 표시한다.
 
 ### Codex 숫자가 낡았다고 표시된다
 
