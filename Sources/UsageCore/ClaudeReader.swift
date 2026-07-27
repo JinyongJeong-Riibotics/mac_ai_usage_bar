@@ -108,7 +108,7 @@ public enum ClaudeReader {
         // Only the file is safe to rotate (see above).
         guard let data = try? Data(contentsOf: credentialsURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var oauth = obj["claudeAiOauth"] as? [String: Any],
+              let oauth = obj["claudeAiOauth"] as? [String: Any],
               let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty
         else { return nil }
 
