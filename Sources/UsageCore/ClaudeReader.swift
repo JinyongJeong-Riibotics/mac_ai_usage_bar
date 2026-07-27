@@ -31,6 +31,12 @@ public enum ClaudeReader {
     }
 
     /// File → keychain, tagged with which one answered (for diagnostics).
+    ///
+    /// When we fall back to the keychain, we **materialise the file** — the same
+    /// thing the manual `security … > ~/.claude/.credentials.json` command did,
+    /// done automatically. That gives auto-refresh a file to own, and because the
+    /// next call then reads the file first, the keychain is touched only this
+    /// once (so the "Always Allow" dialog appears a single time, not per poll).
     static func loadCredentials() -> (data: Data, source: String)? {
         if let data = try? Data(contentsOf: credentialsURL) {
             return (data, "file")
@@ -38,6 +44,7 @@ public enum ClaudeReader {
         if let raw = runCommand("/usr/bin/security",
                                 ["find-generic-password", "-s", keychainService, "-w"]),
            let data = raw.data(using: .utf8) {
+            if parseToken(from: data) != nil { writeBack(data) }
             return (data, "keychain")
         }
         return nil

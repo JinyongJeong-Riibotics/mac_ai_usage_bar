@@ -183,21 +183,23 @@ Apple Developer 계정($99/년) 없이 ad-hoc 서명만 했기 때문에 **공�
 앱은 Claude 토큰을 이 순서로 찾는다:
 
 1. `~/.claude/.credentials.json` (있으면 그대로 사용, 대화상자 없음)
-2. 없으면 `/usr/bin/security`로 **로그인 키체인**의 `Claude Code-credentials` 항목을 읽는다.
+2. 없으면 `/usr/bin/security`로 **로그인 키체인**의 `Claude Code-credentials` 항목을 읽고,
+   **읽은 값을 곧바로 1번 파일로 저장한다**(0600). 즉 수동으로 `security … > …` 하던 일을
+   앱이 대신 한다. 이후로는 항상 1번 경로만 타므로 키체인은 딱 한 번만 건드린다.
 
-2번의 경우 macOS가 처음 한 번 접근을 묻는다. **"항상 허용"**을 누르면 그 뒤로는 뜨지 않는다.
+2번에서 macOS가 처음 한 번 접근을 묻는다. **"항상 허용"**을 누르면 그 뒤로는 뜨지 않는다.
+(파일이 만들어졌으니 다시 물을 일도 없다.)
 
 키체인 항목은 어떤 코드 서명이 접근을 허용받았는지로 보호되는데, macOS는 그 허용을
 **요청한 바이너리**에 귀속시킨다. 앱이 직접(in-process) 읽으면 ad-hoc 서명이라 업데이트마다
 신원이 바뀌어 매번 다시 묻는다. 그래서 신원이 고정된 Apple 서명 도구 `/usr/bin/security`를
 거쳐 읽는다 — "항상 허용" 한 번이 앱 업데이트와 무관하게 영구히 유지된다.
 
-대화상자조차 원치 않으면, 그 PC에서 한 번 아래를 실행해 파일을 만들면 이후 1번 경로만 탄다:
-
-```sh
-security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/.credentials.json
-chmod 600 ~/.claude/.credentials.json
-```
+> 수동으로 미리 파일을 만들고 싶으면 아래도 여전히 유효하지만, 이제는 필수가 아니다:
+> ```sh
+> security find-generic-password -s "Claude Code-credentials" -w > ~/.claude/.credentials.json
+> chmod 600 ~/.claude/.credentials.json
+> ```
 
 ### 인증이 자꾸 만료된다 / 터미널을 켜야만 유지된다
 
@@ -212,8 +214,9 @@ accessToken을 스스로 갱신한다(`api.anthropic.com/v1/oauth/token`). refre
 - **키체인 자격증명은 앱이 갱신하지 않는다.** refreshToken은 회전(rotating)식이라, 앱이
   키체인 토큰을 갱신하면 Claude Code 자신의 refreshToken이 무효화돼 다음 `claude` 실행 때
   재로그인을 요구할 수 있다. 그 충돌을 피하려고 파일 사본만 갱신한다.
-- 따라서 **키체인만 있는 맥에서 무인증 유지를 원하면**, 아래 "키체인 대화상자" 절의
-  일회성 명령으로 파일을 한 번 만들면 그 뒤로는 앱이 알아서 갱신한다.
+- **키체인만 있는 맥도 이제 자동으로 커버된다.** 앱이 키체인을 처음 읽을 때 그 값을 파일로
+  저장하므로("키체인 대화상자" 절 참고), 그 뒤로는 파일 기반이 되어 앱이 알아서 갱신한다.
+  사용자가 할 일은 첫 실행 시 뜨는 키체인 대화상자에서 **"항상 허용"**을 누르는 것뿐이다.
 
 Codex 토큰은 약 10일이고 Codex CLI가 갱신한다. 만료되면 그 PC에서 `codex`를 한 번 실행.
 `usage-probe`가 두 토큰의 남은 수명을 보여준다.
