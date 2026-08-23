@@ -30,43 +30,59 @@ public enum ClaudeReader {
             .appendingPathComponent(".claude/.credentials.json")
     }
 
-    /// File → keychain, tagged with which one answered (for diagnostics).
+    /// Read the token from whichever store is **freshest** (latest `expiresAt`).
     ///
-    /// When we fall back to the keychain, we **materialise the file** — the same
-    /// thing the manual `security … > ~/.claude/.credentials.json` command did,
-    /// done automatically. That gives auto-refresh a file to own, and because the
-    /// next call then reads the file first, the keychain is touched only this
-    /// once (so the "Always Allow" dialog appears a single time, not per poll).
+    /// This is the crux of behaving like the Codex reader: Codex never expires
+    /// because the app reads the file the Codex CLI keeps current. Claude Code on
+    /// macOS keeps the **keychain** current (it refreshes there when you run
+    /// `claude`), so the app must read the keychain — not a stale file copy.
+    ///
+    /// An earlier version materialised a file from the keychain and then only
+    /// ever read that file; running `claude` refreshed the keychain but the app
+    /// kept showing the frozen file, so it looked permanently expired. Picking
+    /// the fresher of the two fixes that: the moment `claude` refreshes the
+    /// keychain, the app sees it. We consult the keychain only when the file
+    /// isn't clearly fresh, to avoid spawning `security` on every healthy poll.
     static func loadCredentials() -> (data: Data, source: String)? {
-        if let data = try? Data(contentsOf: credentialsURL) {
-            return (data, "file")
+        let fileData = (try? Data(contentsOf: credentialsURL))
+            .flatMap { parseToken(from: $0) != nil ? $0 : nil }
+        let fileExpiry = fileData.flatMap { expiresAt(from: $0) } ?? .distantPast
+
+        var keychainData: Data?
+        if fileData == nil || fileExpiry.timeIntervalSinceNow < 1800 {
+            if let raw = runCommand("/usr/bin/security",
+                                    ["find-generic-password", "-s", keychainService, "-w"]),
+               let data = raw.data(using: .utf8), parseToken(from: data) != nil {
+                keychainData = data
+            }
         }
-        if let raw = runCommand("/usr/bin/security",
-                                ["find-generic-password", "-s", keychainService, "-w"]),
-           let data = raw.data(using: .utf8) {
-            if parseToken(from: data) != nil { writeBack(data) }
-            return (data, "keychain")
-        }
+        let keychainExpiry = keychainData.flatMap { expiresAt(from: $0) } ?? .distantPast
+
+        // Freshest wins; ties go to the file (no keychain prompt, self-refreshable).
+        if let fileData, fileExpiry >= keychainExpiry { return (fileData, "file") }
+        if let keychainData { return (keychainData, "keychain") }
+        if let fileData { return (fileData, "file") }
         return nil
     }
 
-    /// One-line summary for `usage-probe`. Reveals no token material.
+    /// Multi-line summary for `usage-probe`. Shows both stores' freshness so a
+    /// "still expired after running claude" case is self-explaining. No secrets.
     public static func diagnosticCredentialSource() -> String {
-        guard let (data, source) = loadCredentials() else {
+        func expiryText(_ data: Data?) -> String {
+            guard let data, parseToken(from: data) != nil else { return "없음/해석불가" }
+            guard let expiry = expiresAt(from: data) else { return "만료시각 미상" }
+            let h = expiry.timeIntervalSinceNow / 3600
+            return h > 0 ? String(format: "만료 %.1fh 후", h) : String(format: "%.1fh 전 만료", -h)
+        }
+        let fileData = try? Data(contentsOf: credentialsURL)
+        let keychainData = runCommand("/usr/bin/security",
+            ["find-generic-password", "-s", keychainService, "-w"])?.data(using: .utf8)
+
+        guard let (chosen, source) = loadCredentials() else {
             return "파일·키체인 어디에도 없음 — 해당 PC에서 `claude` 로그인 필요"
         }
-        guard parseToken(from: data) != nil else {
-            return "\(source)에서 읽었으나 토큰을 해석하지 못함 — claude 재로그인 필요"
-        }
-        let where_ = source == "file" ? "~/.claude/.credentials.json" : "키체인(/usr/bin/security)"
-        var line = "\(where_) 에서 읽음"
-        if let expiry = expiresAt(from: data) {
-            let hours = expiry.timeIntervalSinceNow / 3600
-            line += hours > 0
-                ? String(format: " (토큰 만료 %.1f시간 후)", hours)
-                : String(format: " (토큰 %.1f시간 전 만료 — claude 실행해 갱신 필요)", -hours)
-        }
-        return line
+        let usedExpiry = expiryText(chosen)
+        return "사용: \(source) (\(usedExpiry)) | 파일: \(expiryText(fileData)) | 키체인: \(expiryText(keychainData))"
     }
 
     /// The token is read fresh on every call so we always use the value Claude
@@ -236,26 +252,37 @@ public enum ClaudeReader {
 
     /// Synchronous fetch (blocks the calling thread). Call off the main thread.
     public static func fetch(timeout: TimeInterval = 15) -> ProviderUsage {
-        // Proactively refresh a file-based token that's about to expire, so a
-        // scheduled poll keeps working without the user ever touching a terminal.
-        refreshIfNeeded(timeout: timeout)
-
-        guard let (data, _) = loadCredentials() else {
+        guard var (data, source) = loadCredentials() else {
             return failure("Claude 인증 정보를 찾지 못함 — 해당 PC에서 `claude` 로그인 필요")
         }
+
+        // Self-refresh only the *file* token, and only when the file is the store
+        // we're actually using. We must never rotate the keychain's token: that
+        // would invalidate Claude Code's own refresh token and force it to
+        // re-login. When the keychain is the fresh source (because the user runs
+        // `claude`), we just read it — that's the Codex-style path.
+        if source == "file" {
+            refreshIfNeeded(timeout: timeout)
+            if let reloaded = loadCredentials() { (data, source) = reloaded }
+        }
+
         guard let token = parseToken(from: data) else {
             return failure("인증 정보를 해석하지 못함 — claude 재로그인 필요")
         }
 
         let usage = requestUsage(token: token, timeout: timeout)
 
-        // A 401/403 despite a "valid-looking" token means it was revoked or the
-        // clock was off; try one forced refresh and repeat before giving up.
-        if case let .authFailed(status) = usage,
-           let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
-            let retry = requestUsage(token: refreshed, timeout: timeout)
-            return retry.toProviderUsage(dataForExpiry: try? Data(contentsOf: credentialsURL),
-                                         lastStatus: status)
+        // A 401/403 despite a "valid-looking" token: for a file source, try one
+        // forced refresh and repeat. For a keychain source we can't refresh (see
+        // above), so surface "run claude" — which then refreshes the keychain the
+        // next fetch will read.
+        if case let .authFailed(status) = usage {
+            if source == "file", let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
+                let retry = requestUsage(token: refreshed, timeout: timeout)
+                return retry.toProviderUsage(dataForExpiry: try? Data(contentsOf: credentialsURL),
+                                             lastStatus: status)
+            }
+            return failure("토큰 만료 — 해당 PC에서 `claude`를 한 번 실행하면 갱신됩니다")
         }
         return usage.toProviderUsage(dataForExpiry: data, lastStatus: nil)
     }
