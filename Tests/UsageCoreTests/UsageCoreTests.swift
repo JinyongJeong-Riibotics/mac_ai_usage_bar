@@ -88,6 +88,27 @@ final class CodexLiveParseTests: XCTestCase {
         XCTAssertNil(CodexReader.parseWindow(["used_percent": 5], now: now))
     }
 
+    func testMergedAuthPreservesFieldsAndUpdatesTokens() throws {
+        let original: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": NSNull(),
+            "tokens": ["access_token": "old", "refresh_token": "oldRT",
+                       "id_token": "oldID", "account_id": "acct-1"],
+            "last_refresh": "2026-01-01",
+        ]
+        var tokens = original["tokens"] as! [String: Any]
+        tokens["access_token"] = "newAT"
+        tokens["refresh_token"] = "newRT"
+        let data = try XCTUnwrap(CodexReader.mergedAuth(original: original, tokens: tokens))
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let t = obj["tokens"] as! [String: Any]
+        XCTAssertEqual(t["access_token"] as? String, "newAT")
+        XCTAssertEqual(t["refresh_token"] as? String, "newRT")
+        XCTAssertEqual(t["account_id"] as? String, "acct-1")   // preserved
+        XCTAssertEqual(obj["auth_mode"] as? String, "chatgpt") // preserved
+        XCTAssertEqual(obj["last_refresh"] as? String, "2026-01-01")
+    }
+
     func testTokenExpiryReadsJWTExpClaim() {
         // {"exp":1785261651} base64url, unsigned — parsed for display only.
         let payload = Data(#"{"exp":1785261651}"#.utf8).base64EncodedString()

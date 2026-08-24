@@ -18,6 +18,12 @@ public enum CodexReader {
             .appendingPathComponent(".codex/sessions")
     }
 
+    /// OpenAI OAuth for the Codex CLI. `auth.json` is a plain `0600` file (no
+    /// keychain), so — unlike Claude on macOS — refreshing it in place has no
+    /// divergence risk: it's the single store the CLI itself uses.
+    static let tokenURL = URL(string: "https://auth.openai.com/oauth/token")!
+    static let oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
     struct Auth {
         let accessToken: String
         let accountID: String
@@ -32,14 +38,104 @@ public enum CodexReader {
         return Auth(accessToken: token, accountID: account)
     }
 
+    /// `access_token` is a JWT; read its `exp` for proactive refresh. Display-only.
+    static func accessTokenExpiry() -> Date? {
+        guard let obj = readJSONFile(authURL),
+              let tokens = obj["tokens"] as? [String: Any],
+              let jwt = tokens["access_token"] as? String else { return nil }
+        return tokenExpiry(jwt)
+    }
+
+    /// Refresh the Codex token in place when it's near expiry (or forced by a
+    /// 401), writing the rotated tokens back to `auth.json`. Returns the new
+    /// access token on success. Safe because `auth.json` is the only store.
+    @discardableResult
+    static func refreshIfNeeded(force: Bool = false, timeout: TimeInterval = 15) -> String? {
+        guard let obj = readJSONFile(authURL),
+              var tokens = obj["tokens"] as? [String: Any],
+              let refreshToken = tokens["refresh_token"] as? String, !refreshToken.isEmpty
+        else { return nil }
+
+        // Codex tokens live ~10 days; refresh only within a day of expiry unless forced.
+        if !force, let exp = tokens["access_token"].flatMap({ ($0 as? String).flatMap(tokenExpiry) }),
+           exp.timeIntervalSinceNow > 86400 { return nil }
+
+        let bodyDict: [String: Any] = [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": oauthClientID,
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: bodyDict) else { return nil }
+        let response = HTTP.postJSON(tokenURL, body: body,
+                                     headers: ["Accept": "application/json"], timeout: timeout)
+        guard response.status == 200, let data = response.data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let newAccess = json["access_token"] as? String, !newAccess.isEmpty
+        else { return nil }
+
+        tokens["access_token"] = newAccess
+        if let rt = json["refresh_token"] as? String, !rt.isEmpty { tokens["refresh_token"] = rt }
+        if let idt = json["id_token"] as? String, !idt.isEmpty { tokens["id_token"] = idt }
+        guard let merged = mergedAuth(original: obj, tokens: tokens) else { return nil }
+        writeBackAuth(merged)
+        return newAccess
+    }
+
+    /// Pure merge for testability: fold refreshed tokens into the auth JSON,
+    /// preserving all other fields.
+    static func mergedAuth(original: [String: Any], tokens: [String: Any]) -> Data? {
+        var merged = original
+        merged["tokens"] = tokens
+        return try? JSONSerialization.data(withJSONObject: merged)
+    }
+
+    static func writeBackAuth(_ data: Data) {
+        let tmp = authURL.appendingPathExtension("tmp")
+        do {
+            try data.write(to: tmp, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
+            _ = try FileManager.default.replaceItemAt(authURL, withItemAt: tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+        }
+    }
+
     /// Live usage. Falls back to the local logs when the endpoint can't be
     /// reached or the CLI's token has expired, so the menu keeps showing
     /// *something* — flagged as stale by its `sampledAt`.
     public static func fetch(timeout: TimeInterval = 15) -> ProviderUsage {
-        guard let auth = loadAuth() else {
+        // Proactively refresh a near-expiry token so the app keeps working
+        // without ever running codex. auth.json is the single store, so this is
+        // safe (no keychain, no divergence).
+        refreshIfNeeded(timeout: timeout)
+
+        guard var auth = loadAuth() else {
             return fallback(reason: "~/.codex/auth.json 없음 — 해당 PC에서 codex 로그인 필요")
         }
 
+        var result = requestUsage(auth: auth, timeout: timeout)
+
+        // On a hard auth failure, force one refresh and retry before falling back.
+        if case .authFailed = result, let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
+            auth = Auth(accessToken: refreshed, accountID: auth.accountID)
+            result = requestUsage(auth: auth, timeout: timeout)
+        }
+
+        switch result {
+        case let .ok(usage): return usage
+        case .authFailed:
+            return fallback(reason: "codex 인증 만료 — 자동 갱신 실패. 해당 PC에서 codex 재로그인 필요")
+        case let .other(reason): return fallback(reason: reason)
+        }
+    }
+
+    private enum UsageResult {
+        case ok(ProviderUsage)
+        case authFailed
+        case other(String)
+    }
+
+    private static func requestUsage(auth: Auth, timeout: TimeInterval) -> UsageResult {
         var headers = [
             "Authorization": "Bearer \(auth.accessToken)",
             "Accept": "application/json",
@@ -48,24 +144,17 @@ public enum CodexReader {
         if !auth.accountID.isEmpty { headers["chatgpt-account-id"] = auth.accountID }
 
         let response = HTTP.get(usageURL, headers: headers, timeout: timeout)
-        if let transport = response.transportError {
-            return fallback(reason: "조회 실패: \(transport)")
-        }
+        if let transport = response.transportError { return .other("조회 실패: \(transport)") }
         switch response.status {
         case 200:
             guard let data = response.data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let usage = parseUsage(obj)
-            else { return fallback(reason: "응답을 해석하지 못함") }
-            return usage
-        case 401, 403:
-            // The CLI refreshes this token roughly every 10 days; running codex
-            // once on that machine restores it.
-            return fallback(reason: "codex 인증 만료 — 해당 PC에서 codex를 한 번 실행")
-        case 429:
-            return fallback(reason: "요청이 너무 잦음 (429) — 갱신 주기를 늘리세요")
-        default:
-            return fallback(reason: "HTTP \(response.status)")
+            else { return .other("응답을 해석하지 못함") }
+            return .ok(usage)
+        case 401, 403: return .authFailed
+        case 429: return .other("요청이 너무 잦음 (429) — 갱신 주기를 늘리세요")
+        default: return .other("HTTP \(response.status)")
         }
     }
 
