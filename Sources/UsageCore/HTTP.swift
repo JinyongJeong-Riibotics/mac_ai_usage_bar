@@ -30,6 +30,16 @@ enum HTTP {
         return send(url, method: "POST", headers: h, body: body, timeout: timeout)
     }
 
+    /// JSON POST, used for the Codex OAuth token refresh.
+    static func postJSON(_ url: URL,
+                         body: Data,
+                         headers: [String: String] = [:],
+                         timeout: TimeInterval) -> Response {
+        var h = headers
+        h["Content-Type"] = "application/json"
+        return send(url, method: "POST", headers: h, body: body, timeout: timeout)
+    }
+
     private static func formEncode(_ s: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
