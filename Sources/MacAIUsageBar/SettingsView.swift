@@ -33,6 +33,17 @@ struct SettingsView: View {
                     .font(.caption)
             }
 
+            Section {
+                Toggle("터미널 없이 Claude 인증 유지", isOn: $settings.claudeAutoRefreshViaCLI)
+                    .toggleStyle(.switch)
+                    .tint(.blue)
+            } header: {
+                Text("Claude 인증")
+            } footer: {
+                Text("Claude 토큰은 약 8시간마다 만료되고 Claude Code는 백그라운드에서 갱신하지 않습니다. 이 옵션을 켜면 토큰이 만료됐을 때 앱이 `claude -p`를 잠깐 실행해 Claude Code가 스스로 토큰을 갱신하게 합니다. 갱신마다 아주 작은 메시지 1개를 소모합니다.")
+                    .font(.caption)
+            }
+
             Section("표시") {
                 Picker("표시 방식", selection: $settings.displayMode) {
                     ForEach(DisplayMode.allCases) { Text($0.label).tag($0) }

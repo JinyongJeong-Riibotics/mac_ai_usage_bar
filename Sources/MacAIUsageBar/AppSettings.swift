@@ -36,6 +36,11 @@ final class AppSettings: ObservableObject {
     @Published var colorMenuBar: Bool { didSet { defaults.set(colorMenuBar, forKey: Keys.colorMenuBar) } }
     @Published var warnThreshold: Double { didSet { defaults.set(warnThreshold, forKey: Keys.warnThreshold) } }
 
+    // When the Claude token has expired and can't be refreshed from the file,
+    // run `claude -p` so Claude Code refreshes its own login. Keeps auth alive
+    // without opening a terminal, at the cost of one tiny message per refresh.
+    @Published var claudeAutoRefreshViaCLI: Bool { didSet { defaults.set(claudeAutoRefreshViaCLI, forKey: Keys.claudeAutoRefreshViaCLI) } }
+
     var cautionThreshold: Double { max(0, warnThreshold - 15) }
 
     static let claudeMinInterval: Double = 180
@@ -53,6 +58,7 @@ final class AppSettings: ObservableObject {
         static let notificationsEnabled = "notificationsEnabled"
         static let colorMenuBar = "colorMenuBar"
         static let warnThreshold = "warnThreshold"
+        static let claudeAutoRefreshViaCLI = "claudeAutoRefreshViaCLI"
     }
 
     private init() {
@@ -67,6 +73,7 @@ final class AppSettings: ObservableObject {
         notificationsEnabled = defaults.object(forKey: Keys.notificationsEnabled) as? Bool ?? true
         colorMenuBar = defaults.object(forKey: Keys.colorMenuBar) as? Bool ?? true
         warnThreshold = defaults.object(forKey: Keys.warnThreshold) as? Double ?? 90
+        claudeAutoRefreshViaCLI = defaults.object(forKey: Keys.claudeAutoRefreshViaCLI) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 

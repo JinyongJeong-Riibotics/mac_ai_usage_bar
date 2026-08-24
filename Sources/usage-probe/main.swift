@@ -44,6 +44,7 @@ func environmentReport() {
     print("  codex 인증:   \(CodexReader.diagnosticAuthSource())")
     print("  codex 폴백 로그: \(CodexReader.diagnosticSessionCount())개")
     print("  claude 인증:  \(ClaudeReader.diagnosticCredentialSource())")
+    print("  claude 실행파일: \(ClaudeReader.diagnosticClaudeBinary())")
     print()
 }
 

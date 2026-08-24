@@ -92,6 +92,55 @@ public enum ClaudeReader {
         return parseToken(from: data)
     }
 
+    // MARK: - Refresh via the Claude Code CLI
+
+    /// Throttle so a run of failures can't spawn `claude` repeatedly. Only ever
+    /// touched from the serialized Claude fetch, so unsynchronized access is safe.
+    nonisolated(unsafe) static var lastCLIRefresh: Date?
+
+    /// For `usage-probe`: whether the CLI-refresh path can find `claude`.
+    public static func diagnosticClaudeBinary() -> String {
+        locateClaudeBinary() ?? "claude 실행파일 못 찾음 (터미널 없이 갱신 불가)"
+    }
+
+    /// Find the `claude` executable. GUI apps launch with a minimal PATH, so we
+    /// check the usual install locations first, then fall back to the user's
+    /// login shell to resolve whatever `claude` they actually use.
+    static func locateClaudeBinary() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "\(home)/.local/bin/claude",
+            "\(home)/.claude/local/claude",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+        ]
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        if let found = runCommand(shell, ["-lc", "command -v claude"]),
+           FileManager.default.isExecutableFile(atPath: found) {
+            return found
+        }
+        return nil
+    }
+
+    /// Ask Claude Code to refresh its own token by making one tiny print-mode
+    /// call. This is the keychain-safe way to stay logged in without a terminal:
+    /// Claude Code rotates and rewrites its own credential (keychain on macOS),
+    /// and we just read the fresh value afterwards — we never write the keychain.
+    ///
+    /// Costs one trivial message, so it's throttled and only used as a last
+    /// resort when the token has actually expired. Returns true if `claude` ran.
+    @discardableResult
+    static func triggerCLIRefresh(now: Date = Date(), timeout: TimeInterval = 45) -> Bool {
+        if let last = lastCLIRefresh, now.timeIntervalSince(last) < 1800 { return false }
+        guard let claude = locateClaudeBinary() else { return false }
+        lastCLIRefresh = now
+        _ = runCommand(claude, ["-p", "ok"], timeout: timeout)
+        return true
+    }
+
     /// `expiresAt` is epoch **milliseconds**; used only to explain a 401.
     static func expiresAt(from data: Data) -> Date? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -251,8 +300,17 @@ public enum ClaudeReader {
     }
 
     /// Synchronous fetch (blocks the calling thread). Call off the main thread.
-    public static func fetch(timeout: TimeInterval = 15) -> ProviderUsage {
-        guard var (data, source) = loadCredentials() else {
+    ///
+    /// `cliRefresh`: when the token has expired and can't be refreshed from the
+    /// file, run `claude -p` to let Claude Code refresh its own (keychain) login.
+    /// Off by default; the app passes the user's setting.
+    public static func fetch(timeout: TimeInterval = 15, cliRefresh: Bool = false) -> ProviderUsage {
+        // No readable credentials at all — a CLI refresh might create them.
+        var loaded = loadCredentials()
+        if loaded == nil, cliRefresh, triggerCLIRefresh() {
+            loaded = loadCredentials()
+        }
+        guard var (data, source) = loaded else {
             return failure("Claude 인증 정보를 찾지 못함 — 해당 PC에서 `claude` 로그인 필요")
         }
 
@@ -272,17 +330,23 @@ public enum ClaudeReader {
 
         let usage = requestUsage(token: token, timeout: timeout)
 
-        // A 401/403 despite a "valid-looking" token: for a file source, try one
-        // forced refresh and repeat. For a keychain source we can't refresh (see
-        // above), so surface "run claude" — which then refreshes the keychain the
-        // next fetch will read.
+        // A 401/403 despite a "valid-looking" token: recover in order —
+        // 1) file self-refresh, 2) let Claude Code refresh its own login via the
+        // CLI (keychain-safe), then retry once.
         if case let .authFailed(status) = usage {
             if source == "file", let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
                 let retry = requestUsage(token: refreshed, timeout: timeout)
                 return retry.toProviderUsage(dataForExpiry: try? Data(contentsOf: credentialsURL),
                                              lastStatus: status)
             }
-            return failure("토큰 만료 — 해당 PC에서 `claude`를 한 번 실행하면 갱신됩니다")
+            if cliRefresh, triggerCLIRefresh(),
+               let (freshData, _) = loadCredentials(), let freshToken = parseToken(from: freshData) {
+                let retry = requestUsage(token: freshToken, timeout: timeout)
+                return retry.toProviderUsage(dataForExpiry: freshData, lastStatus: status)
+            }
+            return failure(cliRefresh
+                ? "토큰 갱신 실패 — 해당 PC에서 `claude` 재로그인이 필요할 수 있습니다"
+                : "토큰 만료 — 해당 PC에서 `claude`를 한 번 실행하면 갱신됩니다")
         }
         return usage.toProviderUsage(dataForExpiry: data, lastStatus: nil)
     }
