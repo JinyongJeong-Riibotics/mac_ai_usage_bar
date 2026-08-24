@@ -142,8 +142,9 @@ final class UsageStore: ObservableObject {
             return
         }
         lastClaudeFetch = Date()
+        let cliRefresh = settings.claudeAutoRefreshViaCLI
         Task.detached(priority: .utility) {
-            let usage = ClaudeReader.fetch()
+            let usage = ClaudeReader.fetch(cliRefresh: cliRefresh)
             await MainActor.run {
                 self.lastRefresh = Date()
                 // Don't let a transient error (e.g. 429) erase the last good
