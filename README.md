@@ -1,6 +1,6 @@
 # mac_ai_usage_bar
 
-macOS 메뉴바에서 **Codex**와 **Claude**의 사용률(rate limit)을 보여주는 앱.
+macOS 메뉴바에서 **여러 Codex 계정**과 **Claude 한 계정**의 사용률(rate limit)을 보여주는 앱.
 각 서비스의 5시간 창 / 주간 창에 대해 **사용률 %** 와 **리셋까지 남은 시간**을 표시한다.
 
 ## 표시 항목
@@ -10,13 +10,15 @@ macOS 메뉴바에서 **Codex**와 **Claude**의 사용률(rate limit)을 보여
 | Codex | ✅ (활성 제약일 때) | ✅ | ✅ | ✅ |
 | Claude | ✅ | ✅ | ✅ | ✅ |
 
-메뉴바에는 서비스 이름과 선택한 창의 %를 `Codex 92% · Claude 9%` 형태로 보여주고,
+메뉴바에는 계정/서비스 이름과 선택한 창의 %를 `Codex 92% · Codex 2 31% · Claude 9%` 형태로 보여주고,
 클릭하면 두 서비스의 5h/주간 상세와 리셋 시간이 펼쳐진다.
 
 ## 설정 (Cmd+, 또는 드롭다운 ⚙︎)
 
 - **부팅 시 자동 실행** — `SMAppService` 로그인 항목. `.app` 번들로 실행할 때만 적용된다
   (`swift run`은 번들이 아니라 등록에 실패하고 그 오류를 설정 화면에 표시).
+- **Codex 계정** — 계정마다 표시 이름과 별도 `CODEX_HOME`을 저장하고 개별 활성화/비활성화.
+  `로그인 명령 복사` 버튼으로 해당 프로필의 로그인 명령을 복사할 수 있다.
 - **표시 방식** — 사용량(used) / 남은 량(remaining) 전환. 색상은 항상 "얼마나 소진됐는지"
   기준이라 빨강은 언제나 위험을 뜻한다.
 - **메뉴바 기준 창** — 메뉴바 숫자를 5시간 창 기준으로 볼지 주간 창 기준으로 볼지 선택.
@@ -30,17 +32,16 @@ macOS 메뉴바에서 **Codex**와 **Claude**의 사용률(rate limit)을 보여
 
 ## 데이터 소스
 
-두 서비스 모두 **각 CLI가 터미널 로그인으로 만들어 둔 평문 인증 파일을 그대로 읽어
-실시간 API를 호출**한다. 앱은 자체 로그인 절차가 없고, 키체인도 건드리지 않는다.
-토큰은 매 호출마다 파일에서 새로 읽으며 메모리 밖으로 나가지 않는다.
+Codex는 공식 `codex app-server` 프로토콜로 계정 한도를 읽는다. 계정별로 서로 다른
+`CODEX_HOME`을 넘기고 파일 기반 인증 저장소를 강제하므로, 한 Mac에서도 여러 ChatGPT 계정의
+인증과 설정이 섞이지 않는다. Claude는 기존처럼 Claude Code 자격증명으로 한 계정만 조회한다.
 
 | | Codex | Claude |
 |---|---|---|
-| 인증 파일 | `~/.codex/auth.json` (0600) | `~/.claude/.credentials.json` (0600) |
-| 엔드포인트 | `GET https://chatgpt.com/backend-api/wham/usage` | `GET https://api.anthropic.com/api/oauth/usage` |
-| 헤더 | `Authorization: Bearer` + `chatgpt-account-id` | `Authorization: Bearer` + `User-Agent: claude-code/<version>` |
-| 토큰 수명 | 약 10일, Codex CLI가 갱신 | accessToken 약 8시간 · refreshToken 약 26일 |
-| 토큰 갱신 | Codex CLI에 위임 | **앱이 파일 사본을 직접 갱신** (아래) |
+| 인증 | 계정별 `$CODEX_HOME/auth.json` | `~/.claude/.credentials.json` 또는 로그인 키체인 |
+| 조회 | `codex app-server` → `account/rateLimits/read` | `GET https://api.anthropic.com/api/oauth/usage` |
+| 계정 수 | 여러 계정 | 한 계정 |
+| 토큰 갱신 | Codex CLI/App Server에 위임 | **앱이 파일 사본을 직접 갱신** (아래) |
 | 최소 주기 | 60초 | 180초 (기본 5분) |
 
 Claude Code는 백그라운드에서 토큰을 갱신하지 않으므로, 앱이 파일 기반 자격증명일 때
@@ -48,12 +49,9 @@ Claude Code는 백그라운드에서 토큰을 갱신하지 않으므로, 앱이
 써넣는다(형식·권한 0600 보존). 키체인 자격증명은 회전 충돌을 피하려 갱신하지 않는다.
 자세한 내용은 "문제 해결"의 인증 유지 절 참고.
 
-- **Codex** 응답의 `rate_limit.primary_window` / `secondary_window`를 `limit_window_seconds`로
-  구분한다(18000=5h, 604800=주간). Codex는 **현재 binding되는 한도만 primary로** 주므로
-  주간이 제약일 때 5h 창이 없을 수 있다. 그럴 때 5h는 `—`로 표시된다(데이터 부재, 버그 아님).
-  - 네트워크 실패나 토큰 만료 시에는 로컬 세션 로그
-    `~/.codex/sessions/**/rollout-*.jsonl`로 **폴백**하고, 그 값이 언제 기록된 것인지
-    함께 표시한다. 폴백 값은 그 PC에서 Codex를 마지막으로 돌린 시점의 것이다.
+- **Codex** App Server 응답의 `rateLimitsByLimitId.codex`에서 `primary` / `secondary` 창을 읽는다.
+  프로필은 순차 조회해 여러 계정이 동시에 요청을 몰아 보내지 않으며, 한 계정의 일시적 실패는
+  다른 계정이나 마지막 정상값을 지우지 않는다.
 - **Claude**는 `User-Agent: claude-code/<version>` 헤더가 없으면 공격적으로 429가 나므로
   반드시 붙인다. 429가 나면 간격을 2배씩(최대 8배) 늘렸다가 성공하면 원복하는 백오프가 있고,
   차단 중에도 마지막 정상값을 지우지 않고 경고만 표시한다.
@@ -62,9 +60,23 @@ Claude Code는 백그라운드에서 토큰을 갱신하지 않으므로, 앱이
     시스템이 접근을 물으면 **"항상 허용"**을 누르면 되고, 이후로는 앱을 업데이트해도
     다시 묻지 않는다(자세한 이유는 "문제 해결" 참고).
 
+## Codex 다계정 설정
+
+1. 기존 `~/.codex` 로그인은 첫 번째 `Codex` 프로필로 자동 등록된다.
+2. 설정 → **Codex 계정**에서 `Codex 계정 추가`를 누른다.
+3. 표시 이름과 `CODEX_HOME` 경로를 확인하고 `로그인 명령 복사`를 누른다.
+4. 복사한 명령을 터미널에서 실행한 뒤, 브라우저에서 모니터링할 ChatGPT 계정으로 로그인한다.
+5. 앱에서 새로고침하면 메뉴바와 상세 화면에 해당 계정이 별도 항목으로 나타난다.
+
+각 추가 프로필은 기본적으로 `~/.codex-accounts/account-N`을 사용한다. 다른 PC에서 그 계정을
+사용 중이어도, 이 Mac에서 프로필별 로그인을 한 번 해 두면 서버에 기록된 계정 전체 한도를
+조회하므로 다른 PC의 사용량도 함께 반영된다. `auth.json`에는 접근 토큰이 있으므로 복사·공유하거나
+저장소에 커밋하면 안 된다.
+
 ## 갱신 구조 정리
 
-`UsageStore`가 두 소스를 각각의 타이머로 폴링한다. Codex는 반복 타이머, Claude는
+`UsageStore`가 두 소스를 각각의 타이머로 폴링한다. 활성 Codex 프로필은 같은 반복 타이머에서
+순차 조회하고, Claude는
 매 호출 후 (백오프 반영) 간격으로 재무장하는 단발 타이머다. 설정에서 주기를 바꾸면
 Combine 구독을 통해 타이머가 즉시 재스케줄된다.
 
@@ -74,13 +86,13 @@ Combine 구독을 통해 타이머가 즉시 재스케줄된다.
 Sources/
   UsageCore/          공유 로직 (플랫폼 비의존, GUI 없음)
     Models.swift        RateWindow / ProviderUsage 등 값 타입
-    CodexReader.swift   wham/usage 라이브 조회 (+ 로컬 로그 폴백)
+    CodexReader.swift   계정별 CODEX_HOME + App Server 한도 조회
     ClaudeReader.swift  oauth/usage 라이브 조회
     Formatting.swift    % / 리셋 시간 포매팅
   MacAIUsageBar/      SwiftUI 메뉴바 앱 (MenuBarExtra)
     App.swift           앱 진입점 (Dock 아이콘 없는 accessory 앱)
-    AppSettings.swift   설정 상태 (UserDefaults 영속) + 로그인 항목
-    UsageStore.swift    두 소스 폴링 + @Published 상태 + 백오프
+    AppSettings.swift   설정 상태·Codex 프로필 (UserDefaults 영속) + 로그인 항목
+    UsageStore.swift    계정별 Codex 상태 + Claude 폴링·백오프
     UsageNotifier.swift 임계값 초과 시 macOS 알림
     Severity.swift      사용률→심각도(정상/주의/경고) 및 색상 매핑
     BarLabelView.swift  메뉴바 라벨 (이름·색상·경고 아이콘)
@@ -92,6 +104,7 @@ Sources/
 ## 빌드 / 실행
 
 Swift 6 toolchain 필요 (Xcode 또는 CommandLineTools).
+Codex 모니터링에는 `codex app-server`를 지원하는 최신 Codex CLI가 설치되어 있어야 한다.
 
 ```sh
 # 값만 빠르게 확인 (CLI)
@@ -176,6 +189,10 @@ Apple Developer 계정($99/년) 없이 ad-hoc 서명만 했기 때문에 **공�
 
 ```sh
 /Applications/MacAIUsageBar.app/Contents/MacOS/usage-probe
+
+# 특정 Codex 프로필 진단
+CODEX_HOME="$HOME/.codex-accounts/account-2" \
+  /Applications/MacAIUsageBar.app/Contents/MacOS/usage-probe
 ```
 
 ### Claude 연결과 키체인 대화상자
@@ -190,8 +207,7 @@ Apple Developer 계정($99/년) 없이 ad-hoc 서명만 했기 때문에 **공�
 
 macOS의 Claude Code는 `claude` 실행 시 **키체인**을 갱신한다. 그래서 파일 사본만 읽으면
 `claude`를 돌려도 앱은 낡은 파일을 계속 봐서 "만료"로 뜬다 — 신선한 쪽을 고르면 `claude`가
-키체인을 갱신하는 즉시 앱이 그 값을 읽는다. (Codex가 `~/.codex/auth.json`을 읽어 안 만료되는
-것과 같은 원리 — CLI가 살아있게 유지하는 저장소를 읽는다.)
+키체인을 갱신하는 즉시 앱이 그 값을 읽는다.
 
 키체인 접근은 macOS가 처음 한 번 묻는다. **"항상 허용"**을 누르면 그 뒤로는 뜨지 않는다.
 
@@ -208,13 +224,12 @@ macOS의 Claude Code는 `claude` 실행 시 **키체인**을 갱신한다. 그�
 
 ### 인증이 자꾸 만료된다 / 터미널을 켜야만 유지된다
 
-Claude accessToken은 **약 8시간** 만에 만료되는데(Codex는 10일), **Claude Code는 백그라운드에서
+Claude accessToken은 **약 8시간** 만에 만료되는데, **Claude Code는 백그라운드에서
 토큰을 자동 갱신하지 않는다**(터미널에서 `claude`를 실행할 때만 갱신). 이 8시간은 서버가 정하는
 값이라 앱이 못 늘린다. 그래서 앱은 세 방향으로 이를 버틴다:
 
-1. **신선한 쪽 읽기 (Codex와 같은 원리).** 앱은 파일과 키체인 중 만료가 더 나중인 쪽을 쓴다.
-   `claude`를 한 번이라도 실행하면 키체인이 갱신되고, 앱이 그 즉시 그 값을 읽는다. 즉
-   `codex`를 돌리면 Codex가 유지되는 것처럼, `claude`를 돌리면 Claude가 유지된다.
+1. **신선한 쪽 읽기.** 앱은 파일과 키체인 중 만료가 더 나중인 쪽을 쓴다.
+   `claude`를 한 번이라도 실행하면 키체인이 갱신되고, 앱이 그 즉시 그 값을 읽는다.
 2. **파일 자동 갱신.** 자격증명이 파일에 있으면 앱이 refreshToken으로 accessToken을 직접
    갱신한다(`api.anthropic.com/v1/oauth/token`).
 3. **CLI 자동 갱신 (설정: "터미널 없이 Claude 인증 유지", 기본 켜짐).** 토큰이 만료돼 조회가
@@ -233,11 +248,8 @@ Claude accessToken은 **약 8시간** 만에 만료되는데(Codex는 10일), **
 > 이전 버전(1.3.1)은 키체인을 파일로 자동 복사한 뒤 파일만 읽어서, `claude`를 실행해도
 > 앱이 낡은 파일을 계속 보는 버그가 있었다. 지금은 "신선한 쪽"을 고르므로 해결됐다.
 
-Codex 토큰은 약 10일이고, **앱이 만료 임박 시 직접 갱신한다**(`auth.openai.com/oauth/token`으로
-refreshToken을 보내 새 토큰을 받아 `~/.codex/auth.json`에 원자적으로 저장). Codex는 키체인 없이
-파일 단일 저장소라 이 갱신에 충돌 위험이 없고, inference를 하지 않아 **사용량 소모도 없다.** 즉
-Codex는 별도 설정 없이 터미널 없이 무기한 유지된다.
-`usage-probe`가 파일·키체인 각각의 남은 수명과 앱이 어느 쪽을 쓰는지 보여준다.
+Codex 인증 갱신은 계정별 `CODEX_HOME`에서 실행되는 Codex CLI/App Server가 담당한다. 앱은 토큰을
+직접 해석하거나 별도 인증 엔드포인트로 보내지 않는다.
 
 ### "rate limited (429)"이 가끔 뜬다
 
@@ -246,10 +258,12 @@ Claude 사용량 엔드포인트는 짧은 시간에 여러 번 부르면 429를
 간격으로 합쳐 429를 피한다. 429가 나도 마지막 정상값은 지우지 않고 주기를 자동으로 늘렸다가
 회복하며, 잠깐 경고만 표시한다.
 
-### Codex 숫자가 낡았다고 표시된다
+### Codex 계정에 오류가 표시된다
 
-라이브 조회가 실패하면(오프라인·토큰 만료) 그 PC의 로컬 세션 로그로 폴백하고, 값 아래에
-언제 기록된 것인지 표시한다. 그 PC에서 Codex를 한 번 돌리거나 네트워크를 복구하면 된다.
+`CODEX_HOME 폴더 없음`이면 설정의 `로그인 명령 복사`로 만든 명령을 터미널에서 실행한다.
+인증 오류이면 같은 명령으로 해당 프로필에 다시 로그인한다. `codex 실행파일을 찾지 못함`이면
+Codex CLI를 설치하고 `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` 중 하나에서 실행 가능해야
+한다. 일시적 실패 때는 마지막 정상값을 유지하고 계정 아래에 경고만 표시한다.
 
 ### 로컬에서 테스트 돌리기
 

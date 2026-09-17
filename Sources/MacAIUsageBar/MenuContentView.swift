@@ -9,17 +9,29 @@ struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var settings: AppSettings
 
+    private var codexAccounts: [CodexAccount] {
+        settings.showCodex ? settings.enabledCodexAccounts : []
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            if settings.showCodex {
-                ProviderSection(title: "Codex", systemImage: "chevron.left.forwardslash.chevron.right",
-                                usage: store.codex, settings: settings)
+            ForEach(codexAccounts) { account in
+                ProviderSection(title: account.displayName,
+                                systemImage: "chevron.left.forwardslash.chevron.right",
+                                usage: store.codexByAccount[account.id],
+                                settings: settings,
+                                notice: store.codexNotices[account.id])
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
+                if account.id != codexAccounts.last?.id {
+                    Divider().padding(.horizontal, 14)
+                }
             }
-            if settings.showCodex && settings.showClaude { Divider().padding(.horizontal, 14) }
+            if !codexAccounts.isEmpty && settings.showClaude {
+                Divider().padding(.horizontal, 14)
+            }
             if settings.showClaude {
                 ProviderSection(title: "Claude", systemImage: "sparkle",
                                 usage: store.claude, settings: settings,
@@ -112,33 +124,13 @@ private struct ProviderSection: View {
                 WindowRow(label: "주간", window: usage?.weekly, settings: settings)
             }
 
-            // Codex numbers come from this machine's local session logs, so they
-            // are only as fresh as the last local Codex run. Say so when the
-            // sample is stale, otherwise an old reading looks like a live one.
-            if let usage, let staleness = staleSampleNotice(usage) {
-                Text(staleness)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            if let notice {
+            if let notice, notice != usage?.error {
                 Label(notice, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
         }
     }
-}
-
-/// Codex reads local rollout logs, so a machine that has not run Codex in a
-/// while keeps reporting the last percentage it saw. Surface the sample age
-/// once it is old enough to mislead (Claude is fetched live, so it is exempt).
-func staleSampleNotice(_ usage: ProviderUsage, now: Date = Date()) -> String? {
-    guard usage.provider == .codex else { return nil }
-    guard usage.fiveHour != nil || usage.weekly != nil else { return nil }
-    let age = now.timeIntervalSince(usage.sampledAt)
-    guard age > 3600 else { return nil }
-    return "이 PC의 Codex 로그 기준 · \(formatReset(age)) 전 기록"
 }
 
 private struct WindowRow: View {

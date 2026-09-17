@@ -10,7 +10,8 @@ final class UsageStore: ObservableObject {
     /// for hours; polling and token refresh must not wait for a first click.
     static let shared = UsageStore()
 
-    @Published var codex: ProviderUsage?
+    @Published var codexByAccount: [UUID: ProviderUsage] = [:]
+    @Published var codexNotices: [UUID: String] = [:]
     @Published var claude: ProviderUsage?
     @Published var claudeNotice: String?
     @Published var lastRefresh: Date?
@@ -25,6 +26,8 @@ final class UsageStore: ObservableObject {
     /// re-running: `start()` is called at launch and again on every menu open,
     /// and without this each call stacked another timer and another auth request.
     private var didStart = false
+    private var isCodexRefreshing = false
+    private var codexRefreshPending = false
 
     // Multiplies the Claude interval after a 429 so we back off automatically,
     // resetting to 1 on the next success. Capped so we never stall forever.
@@ -48,6 +51,16 @@ final class UsageStore: ObservableObject {
                 .dropFirst()
                 .sink { [weak self] _ in Task { @MainActor in self?.scheduleCodex() } }
                 .store(in: &cancellables)
+            settings.$codexAccounts
+                .dropFirst()
+                .debounce(for: .milliseconds(600), scheduler: RunLoop.main)
+                .sink { [weak self] _ in
+                    Task { @MainActor in
+                        self?.pruneCodexState()
+                        self?.refreshCodex()
+                    }
+                }
+                .store(in: &cancellables)
             settings.$claudeInterval
                 .dropFirst()
                 .sink { [weak self] _ in Task { @MainActor in self?.scheduleClaude() } }
@@ -60,7 +73,7 @@ final class UsageStore: ObservableObject {
     /// wake, so after opening the lid the menu bar showed the pre-sleep value
     /// until the next scheduled fire. Refresh on wake and restart the cadence
     /// from now. The network is often not up yet at the wake instant, so also
-    /// retry shortly after — the first attempt may fall back to stale local logs.
+    /// retry shortly after.
     private func observeWake() {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -72,7 +85,7 @@ final class UsageStore: ObservableObject {
     private func handleWake() {
         // Restart the cadence from now, then refresh — immediately and a couple
         // of times over the next ~15s, since Wi-Fi/VPN often reconnects a few
-        // seconds after wake and the first attempt falls back to stale local logs.
+        // seconds after wake and the first attempt may fail.
         // The Claude throttle below collapses these into at most one real call.
         scheduleCodex()
         scheduleClaude()
@@ -109,24 +122,59 @@ final class UsageStore: ObservableObject {
     }
 
     func refreshCodex() {
+        guard !isCodexRefreshing else {
+            codexRefreshPending = true
+            return
+        }
+        let accounts = settings.enabledCodexAccounts
+        pruneCodexState()
+        guard !accounts.isEmpty else { return }
+        isCodexRefreshing = true
+
         Task.detached(priority: .utility) {
-            let usage = CodexReader.fetch()
+            // Query sequentially: three short-lived local app-server processes
+            // avoid a burst of simultaneous account requests every minute.
+            let results = accounts.map { account in
+                CodexFetchResult(
+                    accountID: account.id,
+                    accountName: account.displayName,
+                    usage: CodexReader.fetch(codexHomePath: account.codexHomePath)
+                )
+            }
             await MainActor.run {
+                self.isCodexRefreshing = false
                 self.lastRefresh = Date()
-                // A live fetch has no error; a fallback to stale local logs sets
-                // one. Right after wake the network is often down, so the first
-                // fetch falls back — don't let that overwrite a good live value
-                // with an old number (this is why 100% flashed on wake). Adopt
-                // the fallback only when we have nothing better to show.
-                let isLive = usage.error == nil
-                let haveGoodValue = self.codex?.error == nil
-                    && (self.codex?.fiveHour != nil || self.codex?.weekly != nil)
-                if isLive || !haveGoodValue {
-                    self.codex = usage
-                    self.notifier.evaluate(usage, settings: self.settings)
+                let activeIDs = Set(self.settings.enabledCodexAccounts.map(\.id))
+                for result in results where activeIDs.contains(result.accountID) {
+                    let usage = result.usage
+                    if usage.fiveHour != nil || usage.weekly != nil {
+                        self.codexByAccount[result.accountID] = usage
+                        self.codexNotices[result.accountID] = nil
+                        self.notifier.evaluate(
+                            usage,
+                            settings: self.settings,
+                            sourceID: result.accountID.uuidString,
+                            displayName: result.accountName
+                        )
+                    } else {
+                        self.codexNotices[result.accountID] = usage.error
+                        if self.codexByAccount[result.accountID] == nil {
+                            self.codexByAccount[result.accountID] = usage
+                        }
+                    }
+                }
+                if self.codexRefreshPending {
+                    self.codexRefreshPending = false
+                    self.refreshCodex()
                 }
             }
         }
+    }
+
+    private func pruneCodexState() {
+        let activeIDs = Set(settings.enabledCodexAccounts.map(\.id))
+        codexByAccount = codexByAccount.filter { activeIDs.contains($0.key) }
+        codexNotices = codexNotices.filter { activeIDs.contains($0.key) }
     }
 
     /// Timestamp of the last Claude network fetch, for throttling.
@@ -184,6 +232,12 @@ final class UsageStore: ObservableObject {
     var isClaudeBackingOff: Bool { claudeBackoff > 1 }
 }
 
+private struct CodexFetchResult: Sendable {
+    let accountID: UUID
+    let accountName: String
+    let usage: ProviderUsage
+}
+
 /// Displayed percentage for a window given the used/remaining preference.
 func displayedPercent(usedPercent: Double, mode: DisplayMode) -> Double {
     mode == .used ? usedPercent : max(0, 100 - usedPercent)
@@ -191,7 +245,7 @@ func displayedPercent(usedPercent: Double, mode: DisplayMode) -> Double {
 
 /// The window a bar/label should show for a provider, honoring the preferred
 /// window but falling back to the other when the preferred one is absent
-/// (Codex frequently omits its 5h window in the local logs).
+/// (Codex may omit one of its windows in the live response).
 func preferredWindow(_ usage: ProviderUsage?, _ pref: BarWindow) -> RateWindow? {
     guard let usage else { return nil }
     switch pref {

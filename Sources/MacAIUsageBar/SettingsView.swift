@@ -1,7 +1,9 @@
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
+    @State private var copiedAccountID: UUID?
 
     private let codexOptions: [Double] = [30, 60, 120, 300]
     private let claudeOptions: [Double] = [180, 300, 600, 900, 1800]
@@ -30,6 +32,53 @@ struct SettingsView: View {
                 Text("갱신 주기")
             } footer: {
                 Text("Claude 사용량 API는 호출이 잦으면 429로 차단됩니다. 최소 3분 이상 권장하며, 차단 시 자동으로 간격을 늘립니다.")
+                    .font(.caption)
+            }
+
+            Section {
+                ForEach($settings.codexAccounts) { $account in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Toggle("", isOn: $account.isEnabled)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .tint(.blue)
+                            TextField("표시 이름", text: $account.name)
+                            Button(role: .destructive) {
+                                settings.removeCodexAccount(id: account.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(settings.codexAccounts.count == 1)
+                            .help("계정 제거")
+                        }
+
+                        TextField("CODEX_HOME 경로", text: $account.codexHomePath)
+                            .font(.system(.caption, design: .monospaced))
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(account.loginCommand, forType: .string)
+                            copiedAccountID = account.id
+                        } label: {
+                            Label(copiedAccountID == account.id ? "복사됨" : "로그인 명령 복사",
+                                  systemImage: copiedAccountID == account.id ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Button {
+                    settings.addCodexAccount()
+                } label: {
+                    Label("Codex 계정 추가", systemImage: "plus")
+                }
+            } header: {
+                Text("Codex 계정")
+            } footer: {
+                Text("계정마다 별도 CODEX_HOME을 사용합니다. 계정을 추가한 뒤 로그인 명령을 복사해 터미널에서 실행하고, 브라우저에서 해당 계정으로 로그인하세요. 기본 ~/.codex 계정은 기존 로그인을 그대로 사용합니다.")
                     .font(.caption)
             }
 
@@ -90,8 +139,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 360)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 440, height: 720)
     }
 
     private func intervalLabel(_ seconds: Double) -> String {

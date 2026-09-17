@@ -26,7 +26,11 @@ struct BarLabelView: View {
 
     private var segments: [Segment] {
         var result: [Segment] = []
-        if settings.showCodex { result.append(segment("Codex", store.codex)) }
+        if settings.showCodex {
+            result.append(contentsOf: settings.enabledCodexAccounts.map { account in
+                segment(account.displayName, store.codexByAccount[account.id])
+            })
+        }
         if settings.showClaude { result.append(segment("Claude", store.claude)) }
         return result
     }

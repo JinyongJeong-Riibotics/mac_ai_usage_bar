@@ -18,106 +18,46 @@ final class FormattingTests: XCTestCase {
 }
 
 final class CodexParseTests: XCTestCase {
-    func testWeeklyOnly() {
-        let rl: [String: Any] = [
-            "primary": ["used_percent": 92.0, "window_minutes": 10080, "resets_at": 1_785_261_651.0],
-            "secondary": NSNull(),
-        ]
-        let (five, week) = CodexReader.parseRateLimits(rl)
-        XCTAssertNil(five)
-        XCTAssertEqual(week?.window, .weekly)
-        XCTAssertEqual(week?.usedPercent, 92.0)
-    }
-
-    func testFiveHourAndWeekly() {
-        let rl: [String: Any] = [
-            "primary": ["used_percent": 8.0, "window_minutes": 300, "resets_at": 1_782_900_528.0],
-            "secondary": ["used_percent": 10.0, "window_minutes": 10080, "resets_at": 1_783_389_453.0],
-        ]
-        let (five, week) = CodexReader.parseRateLimits(rl)
-        XCTAssertEqual(five?.window, .fiveHour)
-        XCTAssertEqual(five?.usedPercent, 8.0)
-        XCTAssertEqual(week?.window, .weekly)
-        XCTAssertEqual(week?.usedPercent, 10.0)
-    }
-
-    func testEmpty() {
-        let (five, week) = CodexReader.parseRateLimits([:])
-        XCTAssertNil(five)
-        XCTAssertNil(week)
-    }
-}
-
-/// Shape of the live `wham/usage` reply the Codex CLI polls.
-final class CodexLiveParseTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_785_000_000)
 
-    func testParsesWeeklyPrimaryWindow() {
-        let obj: [String: Any] = ["rate_limit": [
-            "primary_window": ["used_percent": 94, "limit_window_seconds": 604800,
-                               "reset_at": 1_785_261_651],
-            "secondary_window": NSNull(),
+    func testParsesNamedCodexBucket() {
+        let response: [String: Any] = ["result": [
+            "rateLimits": NSNull(),
+            "rateLimitsByLimitId": ["codex": [
+                "limitId": "codex",
+                "primary": ["usedPercent": 8, "windowDurationMins": 300,
+                            "resetsAt": 1_785_010_000],
+                "secondary": ["usedPercent": 10, "windowDurationMins": 10080,
+                              "resetsAt": 1_785_500_000],
+            ]],
         ]]
-        let usage = CodexReader.parseUsage(obj, now: now)
-        XCTAssertNil(usage?.fiveHour)
-        XCTAssertEqual(usage?.weekly?.window, .weekly)
-        XCTAssertEqual(usage?.weekly?.usedPercent, 94)
-        XCTAssertEqual(usage?.weekly?.resetsAt, Date(timeIntervalSince1970: 1_785_261_651))
-    }
-
-    func testMapsFiveHourAndWeeklyByWindowLength() {
-        let obj: [String: Any] = ["rate_limit": [
-            "primary_window": ["used_percent": 8, "limit_window_seconds": 18000, "reset_at": 1_785_010_000],
-            "secondary_window": ["used_percent": 10, "limit_window_seconds": 604800, "reset_at": 1_785_500_000],
-        ]]
-        let usage = CodexReader.parseUsage(obj, now: now)
+        let usage = CodexReader.parseAppServerResponse(response, now: now)
         XCTAssertEqual(usage?.fiveHour?.usedPercent, 8)
         XCTAssertEqual(usage?.weekly?.usedPercent, 10)
+        XCTAssertEqual(usage?.sampledAt, now)
     }
 
-    // Some replies carry only a relative reset.
-    func testFallsBackToResetAfterSeconds() {
-        let w = CodexReader.parseWindow(
-            ["used_percent": 50, "limit_window_seconds": 18000, "reset_after_seconds": 600], now: now)
-        XCTAssertEqual(w?.resetsAt, now.addingTimeInterval(600))
+    func testFallsBackToTopLevelRateLimits() {
+        let response: [String: Any] = ["result": ["rateLimits": [
+            "primary": ["usedPercent": 92.0, "windowDurationMins": 10080,
+                        "resetsAt": 1_785_261_651.0],
+            "secondary": NSNull(),
+        ]]]
+        let usage = CodexReader.parseAppServerResponse(response, now: now)
+        XCTAssertNil(usage?.fiveHour)
+        XCTAssertEqual(usage?.weekly?.window, .weekly)
+        XCTAssertEqual(usage?.weekly?.usedPercent, 92.0)
     }
 
-    func testRejectsEmptyOrLimitlessPayloads() {
-        XCTAssertNil(CodexReader.parseUsage([:], now: now))
-        XCTAssertNil(CodexReader.parseUsage(["rate_limit": [:]], now: now))
-        XCTAssertNil(CodexReader.parseWindow(["used_percent": 5], now: now))
+    func testRejectsErrorsAndEmptyLimits() {
+        XCTAssertNil(CodexReader.parseAppServerResponse(["error": ["message": "no"]], now: now))
+        XCTAssertNil(CodexReader.parseAppServerResponse(["result": ["rateLimits": [:]]], now: now))
     }
 
-    func testMergedAuthPreservesFieldsAndUpdatesTokens() throws {
-        let original: [String: Any] = [
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": NSNull(),
-            "tokens": ["access_token": "old", "refresh_token": "oldRT",
-                       "id_token": "oldID", "account_id": "acct-1"],
-            "last_refresh": "2026-01-01",
-        ]
-        var tokens = original["tokens"] as! [String: Any]
-        tokens["access_token"] = "newAT"
-        tokens["refresh_token"] = "newRT"
-        let data = try XCTUnwrap(CodexReader.mergedAuth(original: original, tokens: tokens))
-        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let t = obj["tokens"] as! [String: Any]
-        XCTAssertEqual(t["access_token"] as? String, "newAT")
-        XCTAssertEqual(t["refresh_token"] as? String, "newRT")
-        XCTAssertEqual(t["account_id"] as? String, "acct-1")   // preserved
-        XCTAssertEqual(obj["auth_mode"] as? String, "chatgpt") // preserved
-        XCTAssertEqual(obj["last_refresh"] as? String, "2026-01-01")
-    }
-
-    func testTokenExpiryReadsJWTExpClaim() {
-        // {"exp":1785261651} base64url, unsigned — parsed for display only.
-        let payload = Data(#"{"exp":1785261651}"#.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        XCTAssertEqual(CodexReader.tokenExpiry("header.\(payload).sig"),
-                       Date(timeIntervalSince1970: 1_785_261_651))
-        XCTAssertNil(CodexReader.tokenExpiry("not-a-jwt"))
+    func testResolvesTildeHome() {
+        let expected = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex").standardizedFileURL
+        XCTAssertEqual(CodexReader.resolveHomePath("~/.codex"), expected)
     }
 }
 

@@ -32,9 +32,7 @@ public enum ClaudeReader {
 
     /// Read the token from whichever store is **freshest** (latest `expiresAt`).
     ///
-    /// This is the crux of behaving like the Codex reader: Codex never expires
-    /// because the app reads the file the Codex CLI keeps current. Claude Code on
-    /// macOS keeps the **keychain** current (it refreshes there when you run
+    /// Claude Code on macOS keeps the **keychain** current (it refreshes there when you run
     /// `claude`), so the app must read the keychain — not a stale file copy.
     ///
     /// An earlier version materialised a file from the keychain and then only
@@ -318,7 +316,7 @@ public enum ClaudeReader {
         // we're actually using. We must never rotate the keychain's token: that
         // would invalidate Claude Code's own refresh token and force it to
         // re-login. When the keychain is the fresh source (because the user runs
-        // `claude`), we just read it — that's the Codex-style path.
+        // `claude`), we just read it.
         if source == "file" {
             refreshIfNeeded(timeout: timeout)
             if let reloaded = loadCredentials() { (data, source) = reloaded }
