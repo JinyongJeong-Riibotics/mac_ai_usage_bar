@@ -122,6 +122,16 @@ private struct ProviderSection: View {
             } else {
                 WindowRow(label: "5시간", window: usage?.fiveHour, settings: settings)
                 WindowRow(label: "주간", window: usage?.weekly, settings: settings)
+                if let count = usage?.rateLimitResetCredits {
+                    HStack {
+                        Label("리셋 티켓", systemImage: "ticket")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(count)개")
+                            .font(.callout.monospacedDigit().weight(.medium))
+                    }
+                    .font(.caption)
+                }
             }
 
             if let notice, notice != usage?.error {

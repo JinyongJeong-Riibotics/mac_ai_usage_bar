@@ -83,10 +83,20 @@ public enum CodexReader {
             }
         }
 
+        let resetCreditCount: Int?
+        if let summary = result["rateLimitResetCredits"] as? [String: Any],
+           let rawCount = summary["availableCount"],
+           !(rawCount is NSNull) {
+            resetCreditCount = max(0, intVal(rawCount))
+        } else {
+            resetCreditCount = nil
+        }
+
         guard fiveHour != nil || weekly != nil else { return nil }
         return ProviderUsage(provider: .codex,
                              fiveHour: fiveHour,
                              weekly: weekly,
+                             rateLimitResetCredits: resetCreditCount,
                              sampledAt: now)
     }
 

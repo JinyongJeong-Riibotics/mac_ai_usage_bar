@@ -30,10 +30,15 @@ final class CodexParseTests: XCTestCase {
                 "secondary": ["usedPercent": 10, "windowDurationMins": 10080,
                               "resetsAt": 1_785_500_000],
             ]],
+            "rateLimitResetCredits": [
+                "availableCount": 2,
+                "credits": [],
+            ],
         ]]
         let usage = CodexReader.parseAppServerResponse(response, now: now)
         XCTAssertEqual(usage?.fiveHour?.usedPercent, 8)
         XCTAssertEqual(usage?.weekly?.usedPercent, 10)
+        XCTAssertEqual(usage?.rateLimitResetCredits, 2)
         XCTAssertEqual(usage?.sampledAt, now)
     }
 
@@ -47,6 +52,19 @@ final class CodexParseTests: XCTestCase {
         XCTAssertNil(usage?.fiveHour)
         XCTAssertEqual(usage?.weekly?.window, .weekly)
         XCTAssertEqual(usage?.weekly?.usedPercent, 92.0)
+        XCTAssertNil(usage?.rateLimitResetCredits)
+    }
+
+    func testPreservesZeroAvailableResetCredits() {
+        let response: [String: Any] = ["result": [
+            "rateLimits": [
+                "primary": ["usedPercent": 4, "windowDurationMins": 10080,
+                            "resetsAt": 1_785_261_651],
+            ],
+            "rateLimitResetCredits": ["availableCount": 0, "credits": []],
+        ]]
+        let usage = CodexReader.parseAppServerResponse(response, now: now)
+        XCTAssertEqual(usage?.rateLimitResetCredits, 0)
     }
 
     func testRejectsErrorsAndEmptyLimits() {
