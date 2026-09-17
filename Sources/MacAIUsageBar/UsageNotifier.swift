@@ -22,13 +22,17 @@ final class UsageNotifier {
             }
     }
 
-    func evaluate(_ usage: ProviderUsage, settings: AppSettings) {
+    func evaluate(_ usage: ProviderUsage,
+                  settings: AppSettings,
+                  sourceID: String? = nil,
+                  displayName: String? = nil) {
         guard available, settings.notificationsEnabled else { return }
         for w in [usage.fiveHour, usage.weekly].compactMap({ $0 }) {
-            let key = "\(usage.provider.rawValue)|\(w.window.label)|\(Int(w.resetsAt.timeIntervalSince1970))"
+            let source = sourceID ?? usage.provider.rawValue
+            let key = "\(source)|\(w.window.label)|\(Int(w.resetsAt.timeIntervalSince1970))"
             if w.usedPercent >= settings.warnThreshold {
                 if notifiedKeys.insert(key).inserted {
-                    post(provider: usage.provider, window: w)
+                    post(title: displayName ?? usage.provider.rawValue, window: w)
                 }
             } else if w.usedPercent < settings.cautionThreshold {
                 // Hysteresis: only re-arm once it falls clearly back down, so a
@@ -38,10 +42,10 @@ final class UsageNotifier {
         }
     }
 
-    private func post(provider: Provider, window: RateWindow) {
+    private func post(title: String, window: RateWindow) {
         guard authorized else { return }
         let content = UNMutableNotificationContent()
-        content.title = "\(provider.rawValue) 사용량 경고"
+        content.title = "\(title) 사용량 경고"
         content.body = "\(window.window.label) 사용률 \(formatPercent(window.usedPercent)) · 리셋 \(formatReset(window.timeUntilReset))"
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)

@@ -41,13 +41,15 @@ func environmentReport() {
     let home = FileManager.default.homeDirectoryForCurrentUser
     print("  home: \(home.path)")
 
-    print("  codex 인증:   \(CodexReader.diagnosticAuthSource())")
-    print("  codex 폴백 로그: \(CodexReader.diagnosticSessionCount())개")
+    print("  codex 프로필: \(CodexReader.diagnosticProfile(codexHome))")
+    print("  codex 실행파일: \(CodexReader.diagnosticCodexBinary())")
     print("  claude 인증:  \(ClaudeReader.diagnosticCredentialSource())")
     print("  claude 실행파일: \(ClaudeReader.diagnosticClaudeBinary())")
     print()
 }
 
+let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
+    ?? CodexReader.defaultHomePath
 environmentReport()
-report(CodexReader.fetch())
+report(CodexReader.fetch(codexHomePath: codexHome))
 report(ClaudeReader.fetch())

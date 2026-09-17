@@ -30,16 +30,6 @@ enum HTTP {
         return send(url, method: "POST", headers: h, body: body, timeout: timeout)
     }
 
-    /// JSON POST, used for the Codex OAuth token refresh.
-    static func postJSON(_ url: URL,
-                         body: Data,
-                         headers: [String: String] = [:],
-                         timeout: TimeInterval) -> Response {
-        var h = headers
-        h["Content-Type"] = "application/json"
-        return send(url, method: "POST", headers: h, body: body, timeout: timeout)
-    }
-
     private static func formEncode(_ s: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
@@ -76,16 +66,6 @@ enum HTTP {
 
 final class ResponseBox: @unchecked Sendable {
     var value: HTTP.Response?
-}
-
-/// Reads a CLI's credentials file. Both Codex and Claude Code keep their tokens
-/// in a `0600` JSON file under the home directory, which is exactly the
-/// terminal login we want to reuse — no keychain, no prompts.
-func readJSONFile(_ url: URL) -> [String: Any]? {
-    guard let data = try? Data(contentsOf: url),
-          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return nil }
-    return obj
 }
 
 /// Runs a command and returns its trimmed stdout, or nil on non-zero exit / no

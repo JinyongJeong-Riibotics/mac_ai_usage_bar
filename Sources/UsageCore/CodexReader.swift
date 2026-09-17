@@ -1,318 +1,287 @@
 import Foundation
 
-/// Reads Codex usage live from the same endpoint the Codex CLI polls, using the
-/// CLI's own `~/.codex/auth.json` (a `0600` plaintext file — the terminal login,
-/// no keychain involved). The local rollout logs are kept only as a fallback:
-/// they reflect the last time *this machine* ran Codex, so on a machine that has
-/// not run Codex in days they report a stale percentage.
+/// Reads Codex usage through the official `codex app-server` protocol.
+///
+/// Each account gets its own `CODEX_HOME`, which isolates configuration and
+/// credentials. The CLI is forced to use file-backed credentials so multiple
+/// profiles cannot collapse onto one shared macOS keychain entry.
 public enum CodexReader {
-    static let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    public static let defaultHomePath = "~/.codex"
 
-    static var authURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/auth.json")
-    }
-
-    static var sessionsDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/sessions")
-    }
-
-    /// OpenAI OAuth for the Codex CLI. `auth.json` is a plain `0600` file (no
-    /// keychain), so — unlike Claude on macOS — refreshing it in place has no
-    /// divergence risk: it's the single store the CLI itself uses.
-    static let tokenURL = URL(string: "https://auth.openai.com/oauth/token")!
-    static let oauthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-
-    struct Auth {
-        let accessToken: String
-        let accountID: String
-    }
-
-    static func loadAuth() -> Auth? {
-        guard let obj = readJSONFile(authURL),
-              let tokens = obj["tokens"] as? [String: Any],
-              let token = tokens["access_token"] as? String, !token.isEmpty
-        else { return nil }
-        let account = tokens["account_id"] as? String ?? ""
-        return Auth(accessToken: token, accountID: account)
-    }
-
-    /// `access_token` is a JWT; read its `exp` for proactive refresh. Display-only.
-    static func accessTokenExpiry() -> Date? {
-        guard let obj = readJSONFile(authURL),
-              let tokens = obj["tokens"] as? [String: Any],
-              let jwt = tokens["access_token"] as? String else { return nil }
-        return tokenExpiry(jwt)
-    }
-
-    /// Refresh the Codex token in place when it's near expiry (or forced by a
-    /// 401), writing the rotated tokens back to `auth.json`. Returns the new
-    /// access token on success. Safe because `auth.json` is the only store.
-    @discardableResult
-    static func refreshIfNeeded(force: Bool = false, timeout: TimeInterval = 15) -> String? {
-        guard let obj = readJSONFile(authURL),
-              var tokens = obj["tokens"] as? [String: Any],
-              let refreshToken = tokens["refresh_token"] as? String, !refreshToken.isEmpty
-        else { return nil }
-
-        // Codex tokens live ~10 days; refresh only within a day of expiry unless forced.
-        if !force, let exp = tokens["access_token"].flatMap({ ($0 as? String).flatMap(tokenExpiry) }),
-           exp.timeIntervalSinceNow > 86400 { return nil }
-
-        let bodyDict: [String: Any] = [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": oauthClientID,
-        ]
-        guard let body = try? JSONSerialization.data(withJSONObject: bodyDict) else { return nil }
-        let response = HTTP.postJSON(tokenURL, body: body,
-                                     headers: ["Accept": "application/json"], timeout: timeout)
-        guard response.status == 200, let data = response.data,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let newAccess = json["access_token"] as? String, !newAccess.isEmpty
-        else { return nil }
-
-        tokens["access_token"] = newAccess
-        if let rt = json["refresh_token"] as? String, !rt.isEmpty { tokens["refresh_token"] = rt }
-        if let idt = json["id_token"] as? String, !idt.isEmpty { tokens["id_token"] = idt }
-        guard let merged = mergedAuth(original: obj, tokens: tokens) else { return nil }
-        writeBackAuth(merged)
-        return newAccess
-    }
-
-    /// Pure merge for testability: fold refreshed tokens into the auth JSON,
-    /// preserving all other fields.
-    static func mergedAuth(original: [String: Any], tokens: [String: Any]) -> Data? {
-        var merged = original
-        merged["tokens"] = tokens
-        return try? JSONSerialization.data(withJSONObject: merged)
-    }
-
-    static func writeBackAuth(_ data: Data) {
-        let tmp = authURL.appendingPathExtension("tmp")
-        do {
-            try data.write(to: tmp, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
-            _ = try FileManager.default.replaceItemAt(authURL, withItemAt: tmp)
-        } catch {
-            try? FileManager.default.removeItem(at: tmp)
-        }
-    }
-
-    /// Live usage. Falls back to the local logs when the endpoint can't be
-    /// reached or the CLI's token has expired, so the menu keeps showing
-    /// *something* — flagged as stale by its `sampledAt`.
-    public static func fetch(timeout: TimeInterval = 15) -> ProviderUsage {
-        // Proactively refresh a near-expiry token so the app keeps working
-        // without ever running codex. auth.json is the single store, so this is
-        // safe (no keychain, no divergence).
-        refreshIfNeeded(timeout: timeout)
-
-        guard var auth = loadAuth() else {
-            return fallback(reason: "~/.codex/auth.json 없음 — 해당 PC에서 codex 로그인 필요")
-        }
-
-        var result = requestUsage(auth: auth, timeout: timeout)
-
-        // On a hard auth failure, force one refresh and retry before falling back.
-        if case .authFailed = result, let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
-            auth = Auth(accessToken: refreshed, accountID: auth.accountID)
-            result = requestUsage(auth: auth, timeout: timeout)
-        }
-
-        switch result {
-        case let .ok(usage): return usage
-        case .authFailed:
-            return fallback(reason: "codex 인증 만료 — 자동 갱신 실패. 해당 PC에서 codex 재로그인 필요")
-        case let .other(reason): return fallback(reason: reason)
-        }
-    }
-
-    private enum UsageResult {
-        case ok(ProviderUsage)
-        case authFailed
-        case other(String)
-    }
-
-    private static func requestUsage(auth: Auth, timeout: TimeInterval) -> UsageResult {
-        var headers = [
-            "Authorization": "Bearer \(auth.accessToken)",
-            "Accept": "application/json",
-            "User-Agent": "codex-cli",
-        ]
-        if !auth.accountID.isEmpty { headers["chatgpt-account-id"] = auth.accountID }
-
-        let response = HTTP.get(usageURL, headers: headers, timeout: timeout)
-        if let transport = response.transportError { return .other("조회 실패: \(transport)") }
-        switch response.status {
-        case 200:
-            guard let data = response.data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let usage = parseUsage(obj)
-            else { return .other("응답을 해석하지 못함") }
-            return .ok(usage)
-        case 401, 403: return .authFailed
-        case 429: return .other("요청이 너무 잦음 (429) — 갱신 주기를 늘리세요")
-        default: return .other("HTTP \(response.status)")
-        }
-    }
-
-    /// `{"rate_limit": {"primary_window": {...}, "secondary_window": {...}}}`,
-    /// where each window carries `used_percent`, `limit_window_seconds`
-    /// (18000 = 5h, 604800 = weekly) and an epoch `reset_at`.
-    static func parseUsage(_ obj: [String: Any], now: Date = Date()) -> ProviderUsage? {
-        guard let limits = obj["rate_limit"] as? [String: Any] else { return nil }
-        var five: RateWindow?
-        var week: RateWindow?
-        for key in ["primary_window", "secondary_window"] {
-            guard let w = limits[key] as? [String: Any] else { continue }
-            guard let win = parseWindow(w, now: now) else { continue }
-            if win.window == .fiveHour { five = win } else { week = win }
-        }
-        guard five != nil || week != nil else { return nil }
-        return ProviderUsage(provider: .codex, fiveHour: five, weekly: week, sampledAt: now)
-    }
-
-    static func parseWindow(_ w: [String: Any], now: Date) -> RateWindow? {
-        let seconds = intVal(w["limit_window_seconds"])
-        guard seconds > 0 else { return nil }
-        // Anything shorter than a day is the rolling 5h window; the other is weekly.
-        let window: UsageWindow = seconds <= 86400 ? .fiveHour : .weekly
-        let reset: Date
-        if let at = w["reset_at"], intVal(at) > 0 {
-            reset = Date(timeIntervalSince1970: doubleVal(at))
-        } else {
-            reset = now.addingTimeInterval(doubleVal(w["reset_after_seconds"]))
-        }
-        return RateWindow(window: window, usedPercent: doubleVal(w["used_percent"]), resetsAt: reset)
-    }
-
-    /// Local-log reading, annotated with why the live call didn't happen.
-    static func fallback(reason: String) -> ProviderUsage {
-        let local = latest()
-        let note = "\(reason) · 이 PC의 로컬 로그 사용"
-        return ProviderUsage(provider: .codex,
-                             fiveHour: local.fiveHour,
-                             weekly: local.weekly,
-                             sampledAt: local.sampledAt,
-                             error: local.fiveHour == nil && local.weekly == nil
-                                 ? "\(reason) · 로컬 로그에도 기록 없음"
-                                 : note)
-    }
-
-    static func rolloutFilesNewestFirst(limit: Int) -> [(url: URL, modified: Date)] {
-        let fm = FileManager.default
-        guard let en = fm.enumerator(
-            at: sessionsDir,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-
-        var files: [(URL, Date)] = []
-        for case let url as URL in en where url.pathExtension == "jsonl" {
-            let mod = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            files.append((url, mod))
-        }
-        return files.sorted { $0.1 > $1.1 }.prefix(limit).map { ($0.0, $0.1) }
-    }
-
-    /// Number of rollout logs the scan can see, for `usage-probe` diagnostics.
-    public static func diagnosticSessionCount(scanLimit: Int = 40) -> Int {
-        rolloutFilesNewestFirst(limit: scanLimit).count
-    }
-
-    /// One-line auth summary for `usage-probe`. Reveals no token material.
-    public static func diagnosticAuthSource() -> String {
-        guard let auth = loadAuth() else {
-            return "~/.codex/auth.json 없음 — 해당 PC에서 `codex` 로그인 필요"
-        }
-        var line = "~/.codex/auth.json 에서 읽음"
-        line += auth.accountID.isEmpty ? " (account_id 없음)" : ""
-        if let exp = tokenExpiry(auth.accessToken) {
-            let hours = exp.timeIntervalSinceNow / 3600
-            line += hours > 0
-                ? String(format: " (토큰 만료 %.1f일 후)", hours / 24)
-                : String(format: " (토큰 만료됨 — codex 한 번 실행 필요)")
-        }
-        return line
-    }
-
-    /// `exp` claim of the JWT access token. Signature is not verified — this is
-    /// only used to explain a 401 to the user, never to authorize anything.
-    static func tokenExpiry(_ jwt: String) -> Date? {
-        let parts = jwt.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+")
-                                  .replacingOccurrences(of: "_", with: "/")
-        while b64.count % 4 != 0 { b64 += "=" }
-        guard let data = Data(base64Encoded: b64),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        let exp = doubleVal(obj["exp"])
-        return exp > 0 ? Date(timeIntervalSince1970: exp) : nil
-    }
-
-    /// Last `rate_limits` sample written in a single session file (newest first
-    /// within the file), mapped into the two windows it contains.
-    static func windows(in file: URL) -> (five: RateWindow?, week: RateWindow?)? {
-        guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-        var last: [String: Any]?
-        for line in content.split(separator: "\n") {
-            guard line.contains("rate_limits") else { continue }
-            guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let payload = obj["payload"] as? [String: Any],
-                  let rl = payload["rate_limits"] as? [String: Any]
-            else { continue }
-            last = rl
-        }
-        guard let rl = last else { return nil }
-        return parseRateLimits(rl)
-    }
-
-    /// Maps a raw `rate_limits` object into 5h / weekly windows by
-    /// `window_minutes` (300 = 5h, 10080 = weekly). Pure — unit-testable.
-    static func parseRateLimits(_ rl: [String: Any]) -> (five: RateWindow?, week: RateWindow?) {
-        var five: RateWindow?
-        var week: RateWindow?
-        for key in ["primary", "secondary"] {
-            guard let w = rl[key] as? [String: Any] else { continue }
-            let minutes = intVal(w["window_minutes"])
-            let win = RateWindow(
-                window: minutes == 300 ? .fiveHour : .weekly,
-                usedPercent: doubleVal(w["used_percent"]),
-                resetsAt: Date(timeIntervalSince1970: doubleVal(w["resets_at"]))
-            )
-            if minutes == 300 { five = win } else if minutes == 10080 { week = win }
-        }
-        return (five, week)
-    }
-
-    /// Codex reports whichever limit is currently binding as `primary`, so a
-    /// single session may omit the 5h or weekly window. We walk recent sessions
-    /// newest-first and take, for each window, the most recent sample whose reset
-    /// still lies in the future (i.e. describes the window that is live now).
-    public static func latest(scanLimit: Int = 40) -> ProviderUsage {
-        let files = rolloutFilesNewestFirst(limit: scanLimit)
-        guard let newestMod = files.first?.modified else {
-            return ProviderUsage(provider: .codex, fiveHour: nil, weekly: nil,
-                                 sampledAt: Date(), error: "no session logs found")
-        }
-
+    /// Fetch the limits for one Codex profile. This method is synchronous by
+    /// design; callers run it on a detached utility task.
+    public static func fetch(codexHomePath: String = defaultHomePath,
+                             timeout: TimeInterval = 15) -> ProviderUsage {
         let now = Date()
-        var five: RateWindow?
-        var week: RateWindow?
-        for (url, _) in files {
-            guard let w = windows(in: url) else { continue }
-            if five == nil, let f = w.five, f.resetsAt > now { five = f }
-            if week == nil, let k = w.week, k.resetsAt > now { week = k }
-            if five != nil && week != nil { break }
+        let trimmed = codexHomePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return failure("CODEX_HOME 경로가 비어 있음", sampledAt: now)
         }
 
-        let err = (five == nil && week == nil) ? "no rate_limits in recent sessions" : nil
-        return ProviderUsage(provider: .codex, fiveHour: five, weekly: week,
-                             sampledAt: newestMod, error: err)
+        let home = resolveHomePath(trimmed)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: home.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return failure("CODEX_HOME 폴더 없음: \(home.path) · 설정에서 로그인 명령을 실행하세요",
+                           sampledAt: now)
+        }
+        guard let executable = codexExecutablePath() else {
+            return failure("codex 실행파일을 찾지 못함", sampledAt: now)
+        }
+
+        switch requestRateLimits(executable: executable, codexHome: home, timeout: timeout) {
+        case let .success(message):
+            guard let usage = parseAppServerResponse(message, now: now) else {
+                return failure("Codex 한도 응답을 해석하지 못함", sampledAt: now)
+            }
+            return usage
+        case let .failure(error):
+            return failure(error.description, sampledAt: now)
+        }
+    }
+
+    /// Expands `~` exactly as the CLI setup command shown by the app does.
+    public static func resolveHomePath(_ path: String) -> URL {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+            .standardizedFileURL
+    }
+
+    /// Diagnostic text for `usage-probe`; it deliberately reveals no tokens.
+    public static func diagnosticProfile(_ codexHomePath: String = defaultHomePath) -> String {
+        let home = resolveHomePath(codexHomePath)
+        let auth = home.appendingPathComponent("auth.json")
+        let authStatus = FileManager.default.fileExists(atPath: auth.path)
+            ? "auth.json 있음"
+            : "auth.json 없음"
+        return "\(home.path) (\(authStatus))"
+    }
+
+    public static func diagnosticCodexBinary() -> String {
+        codexExecutablePath() ?? "찾지 못함"
+    }
+
+    /// Pure parser for the JSON-RPC response to `account/rateLimits/read`.
+    /// Prefer the named `codex` bucket because the protocol may expose other
+    /// limits alongside it; fall back to the compatibility `rateLimits` field.
+    static func parseAppServerResponse(_ message: [String: Any],
+                                       now: Date = Date()) -> ProviderUsage? {
+        guard let result = message["result"] as? [String: Any] else { return nil }
+        let byID = result["rateLimitsByLimitId"] as? [String: Any]
+        let limits = (byID?["codex"] as? [String: Any])
+            ?? (result["rateLimits"] as? [String: Any])
+        guard let limits else { return nil }
+
+        var fiveHour: RateWindow?
+        var weekly: RateWindow?
+        for key in ["primary", "secondary"] {
+            guard let object = limits[key] as? [String: Any],
+                  let window = parseAppServerWindow(object)
+            else { continue }
+            switch window.window {
+            case .fiveHour: fiveHour = window
+            case .weekly: weekly = window
+            }
+        }
+
+        guard fiveHour != nil || weekly != nil else { return nil }
+        return ProviderUsage(provider: .codex,
+                             fiveHour: fiveHour,
+                             weekly: weekly,
+                             sampledAt: now)
+    }
+
+    static func parseAppServerWindow(_ object: [String: Any]) -> RateWindow? {
+        let minutes = intVal(object["windowDurationMins"])
+        let resetEpoch = doubleVal(object["resetsAt"])
+        guard minutes > 0, resetEpoch > 0 else { return nil }
+
+        // Current Codex plans expose 300-minute and 10,080-minute windows. Keep
+        // the pre-existing UI's shorter/longer fallback for compatible plans.
+        let window: UsageWindow = minutes <= 1440 ? .fiveHour : .weekly
+        return RateWindow(window: window,
+                          usedPercent: doubleVal(object["usedPercent"]),
+                          resetsAt: Date(timeIntervalSince1970: resetEpoch))
+    }
+
+    private static func failure(_ message: String, sampledAt: Date) -> ProviderUsage {
+        ProviderUsage(provider: .codex,
+                      fiveHour: nil,
+                      weekly: nil,
+                      sampledAt: sampledAt,
+                      error: message)
+    }
+
+    private enum AppServerError: Error {
+        case launch(String)
+        case initializeTimeout
+        case initialize(String)
+        case requestTimeout
+        case request(String)
+
+        var description: String {
+            switch self {
+            case let .launch(message): return "Codex App Server 실행 실패: \(message)"
+            case .initializeTimeout: return "Codex App Server 초기화 시간 초과"
+            case let .initialize(message): return "Codex App Server 초기화 실패: \(message)"
+            case .requestTimeout: return "Codex 한도 조회 시간 초과"
+            case let .request(message): return "Codex 한도 조회 실패: \(message)"
+            }
+        }
+    }
+
+    private static func requestRateLimits(executable: String,
+                                          codexHome: URL,
+                                          timeout: TimeInterval)
+        -> Result<[String: Any], AppServerError> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["app-server", "-c", "cli_auth_credentials_store=\"file\""]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_HOME"] = codexHome.path
+        environment["CODEX_SQLITE_HOME"] = codexHome.path
+        environment.removeValue(forKey: "CODEX_ACCESS_TOKEN")
+        environment.removeValue(forKey: "CODEX_API_KEY")
+        environment.removeValue(forKey: "OPENAI_API_KEY")
+        process.environment = environment
+
+        let input = Pipe()
+        let output = Pipe()
+        let collector = AppServerOutputCollector()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty { collector.consume(data) }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            output.fileHandleForReading.readabilityHandler = nil
+            return .failure(.launch(error.localizedDescription))
+        }
+
+        defer {
+            try? input.fileHandleForWriting.close()
+            output.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning { process.terminate() }
+        }
+
+        do {
+            try writeJSONLine([
+                "method": "initialize",
+                "id": 1,
+                "params": [
+                    "clientInfo": [
+                        "name": "mac_ai_usage_bar",
+                        "title": "Mac AI Usage Bar",
+                        "version": "1",
+                    ],
+                ],
+            ], to: input.fileHandleForWriting)
+        } catch {
+            return .failure(.launch(error.localizedDescription))
+        }
+
+        guard collector.initializeSignal.wait(timeout: .now() + timeout) == .success else {
+            return .failure(.initializeTimeout)
+        }
+        if let message = collector.errorMessage(for: 1) {
+            return .failure(.initialize(message))
+        }
+
+        do {
+            try writeJSONLine(["method": "initialized", "params": [:]],
+                              to: input.fileHandleForWriting)
+            try writeJSONLine(["method": "account/rateLimits/read", "id": 2],
+                              to: input.fileHandleForWriting)
+        } catch {
+            return .failure(.request(error.localizedDescription))
+        }
+
+        guard collector.rateLimitsSignal.wait(timeout: .now() + timeout) == .success else {
+            return .failure(.requestTimeout)
+        }
+        if let message = collector.errorMessage(for: 2) {
+            return .failure(.request(message))
+        }
+        guard let response = collector.response(for: 2) else {
+            return .failure(.request("빈 응답"))
+        }
+        return .success(response)
+    }
+
+    private static func writeJSONLine(_ object: [String: Any], to handle: FileHandle) throws {
+        var data = try JSONSerialization.data(withJSONObject: object)
+        data.append(0x0A)
+        try handle.write(contentsOf: data)
+    }
+
+    private static func codexExecutablePath() -> String? {
+        var candidates: [String] = []
+        if let path = ProcessInfo.processInfo.environment["PATH"] {
+            candidates.append(contentsOf: path.split(separator: ":").map { "\($0)/codex" })
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        candidates.append(contentsOf: [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "\(home)/.local/bin/codex",
+            "\(home)/.codex/bin/codex",
+        ])
+
+        var seen = Set<String>()
+        return candidates.first { path in
+            seen.insert(path).inserted && FileManager.default.isExecutableFile(atPath: path)
+        }
+    }
+}
+
+/// `FileHandle.readabilityHandler` runs on a Foundation-managed queue. Keep all
+/// mutable parser state behind a lock and expose only semaphore-based handoffs
+/// to the synchronous reader above.
+private final class AppServerOutputCollector: @unchecked Sendable {
+    let initializeSignal = DispatchSemaphore(value: 0)
+    let rateLimitsSignal = DispatchSemaphore(value: 0)
+
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var responses: [Int: [String: Any]] = [:]
+    private var signaledIDs = Set<Int>()
+
+    func consume(_ data: Data) {
+        lock.lock()
+        buffer.append(data)
+        var completed: [Int] = []
+
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let line = buffer[..<newline]
+            buffer.removeSubrange(...newline)
+            guard !line.isEmpty,
+                  let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+            else { continue }
+            let id = intVal(object["id"])
+            guard id == 1 || id == 2 else { continue }
+            responses[id] = object
+            if signaledIDs.insert(id).inserted { completed.append(id) }
+        }
+        lock.unlock()
+
+        for id in completed {
+            if id == 1 { initializeSignal.signal() }
+            if id == 2 { rateLimitsSignal.signal() }
+        }
+    }
+
+    func response(for id: Int) -> [String: Any]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return responses[id]
+    }
+
+    func errorMessage(for id: Int) -> String? {
+        guard let error = response(for: id)?["error"] as? [String: Any] else { return nil }
+        return error["message"] as? String ?? "알 수 없는 JSON-RPC 오류"
     }
 }
