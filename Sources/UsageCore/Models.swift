@@ -35,17 +35,22 @@ public struct ProviderUsage: Sendable {
     public let provider: Provider
     public let fiveHour: RateWindow?
     public let weekly: RateWindow?
+    /// Number of Codex rate-limit reset credits available to the account.
+    /// `nil` for other providers or Codex versions that do not expose it.
+    public let rateLimitResetCredits: Int?
     public let sampledAt: Date
     public let error: String?
 
     public init(provider: Provider,
                 fiveHour: RateWindow?,
                 weekly: RateWindow?,
+                rateLimitResetCredits: Int? = nil,
                 sampledAt: Date,
                 error: String? = nil) {
         self.provider = provider
         self.fiveHour = fiveHour
         self.weekly = weekly
+        self.rateLimitResetCredits = rateLimitResetCredits
         self.sampledAt = sampledAt
         self.error = error
     }
