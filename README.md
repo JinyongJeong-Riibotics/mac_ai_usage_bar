@@ -265,6 +265,10 @@ Claude 사용량 엔드포인트는 짧은 시간에 여러 번 부르면 429를
 Codex CLI를 설치하고 `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` 중 하나에서 실행 가능해야
 한다. 일시적 실패 때는 마지막 정상값을 유지하고 계정 아래에 경고만 표시한다.
 
+`v1.6.0`에서 Homebrew Codex를 사용하면 Finder/로그인 항목의 제한된 `PATH` 때문에
+`Codex App Server 초기화 시간 초과`가 발생할 수 있었다. `v1.6.1`부터 앱이 Codex 실행 경로를
+자식 프로세스의 `PATH`에 자동으로 추가하고, 프로세스가 조기 종료되면 실제 stderr 원인을 표시한다.
+
 ### 로컬에서 테스트 돌리기
 
 `xcode-select`가 Command Line Tools를 가리키면 `XCTest`가 없어 `swift test`가 실패한다:

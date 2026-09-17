@@ -139,6 +139,10 @@ public enum CodexReader {
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = codexHome.path
         environment["CODEX_SQLITE_HOME"] = codexHome.path
+        environment["PATH"] = augmentedPath(
+            executablePath: executable,
+            inheritedPath: environment["PATH"]
+        )
         environment.removeValue(forKey: "CODEX_ACCESS_TOKEN")
         environment.removeValue(forKey: "CODEX_API_KEY")
         environment.removeValue(forKey: "OPENAI_API_KEY")
@@ -146,25 +150,33 @@ public enum CodexReader {
 
         let input = Pipe()
         let output = Pipe()
+        let errorOutput = Pipe()
         let collector = AppServerOutputCollector()
+        let errorCollector = ProcessTextCollector()
         process.standardInput = input
         process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errorOutput
         output.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if !data.isEmpty { collector.consume(data) }
+        }
+        errorOutput.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty { errorCollector.consume(data) }
         }
 
         do {
             try process.run()
         } catch {
             output.fileHandleForReading.readabilityHandler = nil
+            errorOutput.fileHandleForReading.readabilityHandler = nil
             return .failure(.launch(error.localizedDescription))
         }
 
         defer {
             try? input.fileHandleForWriting.close()
             output.fileHandleForReading.readabilityHandler = nil
+            errorOutput.fileHandleForReading.readabilityHandler = nil
             if process.isRunning { process.terminate() }
         }
 
@@ -184,7 +196,11 @@ public enum CodexReader {
             return .failure(.launch(error.localizedDescription))
         }
 
-        guard collector.initializeSignal.wait(timeout: .now() + timeout) == .success else {
+        switch wait(for: collector.initializeSignal, process: process, timeout: timeout) {
+        case .signaled: break
+        case .exited:
+            return .failure(.initialize(errorCollector.text ?? "codex 프로세스가 응답 없이 종료됨"))
+        case .timedOut:
             return .failure(.initializeTimeout)
         }
         if let message = collector.errorMessage(for: 1) {
@@ -200,7 +216,11 @@ public enum CodexReader {
             return .failure(.request(error.localizedDescription))
         }
 
-        guard collector.rateLimitsSignal.wait(timeout: .now() + timeout) == .success else {
+        switch wait(for: collector.rateLimitsSignal, process: process, timeout: timeout) {
+        case .signaled: break
+        case .exited:
+            return .failure(.request(errorCollector.text ?? "codex 프로세스가 응답 없이 종료됨"))
+        case .timedOut:
             return .failure(.requestTimeout)
         }
         if let message = collector.errorMessage(for: 2) {
@@ -216,6 +236,47 @@ public enum CodexReader {
         var data = try JSONSerialization.data(withJSONObject: object)
         data.append(0x0A)
         try handle.write(contentsOf: data)
+    }
+
+    /// GUI apps launched by Finder/login items inherit a minimal PATH. Homebrew's
+    /// `codex` is commonly a `#!/usr/bin/env node` script, so its own directory
+    /// must be present for `env` to find the adjacent Node runtime.
+    static func augmentedPath(executablePath: String, inheritedPath: String?) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var directories = [
+            URL(fileURLWithPath: executablePath).deletingLastPathComponent().path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/.local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        if let inheritedPath {
+            directories.append(contentsOf: inheritedPath.split(separator: ":").map(String.init))
+        }
+
+        var seen = Set<String>()
+        return directories.filter { !$0.isEmpty && seen.insert($0).inserted }
+            .joined(separator: ":")
+    }
+
+    private enum SignalWaitResult {
+        case signaled
+        case exited
+        case timedOut
+    }
+
+    private static func wait(for signal: DispatchSemaphore,
+                             process: Process,
+                             timeout: TimeInterval) -> SignalWaitResult {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if signal.wait(timeout: .now() + 0.1) == .success { return .signaled }
+            if !process.isRunning { return .exited }
+        }
+        return .timedOut
     }
 
     private static func codexExecutablePath() -> String? {
@@ -235,6 +296,26 @@ public enum CodexReader {
         return candidates.first { path in
             seen.insert(path).inserted && FileManager.default.isExecutableFile(atPath: path)
         }
+    }
+}
+
+private final class ProcessTextCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func consume(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        data.append(chunk)
+        if data.count > 16_384 { data = data.suffix(16_384) }
+    }
+
+    var text: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
     }
 }
 

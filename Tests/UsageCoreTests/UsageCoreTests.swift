@@ -59,6 +59,17 @@ final class CodexParseTests: XCTestCase {
             .appendingPathComponent(".codex").standardizedFileURL
         XCTAssertEqual(CodexReader.resolveHomePath("~/.codex").path, expected.path)
     }
+
+    func testAugmentedPathMakesHomebrewRuntimeAvailableToGUIProcess() {
+        let path = CodexReader.augmentedPath(
+            executablePath: "/opt/homebrew/bin/codex",
+            inheritedPath: "/usr/bin:/bin"
+        ).split(separator: ":").map(String.init)
+
+        XCTAssertEqual(path.first, "/opt/homebrew/bin")
+        XCTAssertTrue(path.contains("/usr/bin"))
+        XCTAssertEqual(path.filter { $0 == "/opt/homebrew/bin" }.count, 1)
+    }
 }
 
 final class ClaudeRefreshMergeTests: XCTestCase {
