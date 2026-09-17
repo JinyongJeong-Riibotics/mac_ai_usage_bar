@@ -57,7 +57,7 @@ final class CodexParseTests: XCTestCase {
     func testResolvesTildeHome() {
         let expected = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex").standardizedFileURL
-        XCTAssertEqual(CodexReader.resolveHomePath("~/.codex"), expected)
+        XCTAssertEqual(CodexReader.resolveHomePath("~/.codex").path, expected.path)
     }
 }
 
