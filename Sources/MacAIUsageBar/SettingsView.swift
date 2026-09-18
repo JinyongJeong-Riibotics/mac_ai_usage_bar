@@ -145,7 +145,7 @@ struct SettingsView: View {
             } header: {
                 Text("Claude 인증")
             } footer: {
-                Text("Claude 토큰은 약 8시간마다 만료되고 Claude Code는 백그라운드에서 갱신하지 않습니다. 이 옵션을 켜면 토큰이 만료됐을 때 앱이 `claude -p`를 잠깐 실행해 Claude Code가 스스로 토큰을 갱신하게 합니다. 갱신마다 아주 작은 메시지 1개를 소모합니다.")
+                Text("Claude 토큰은 약 8시간마다 만료되고 Claude Code는 백그라운드에서 갱신하지 않습니다. 이 옵션을 켜면 토큰이 만료됐을 때 앱이 파일 도구·플러그인을 끈 제한 모드로 `claude -p`를 잠깐 실행해 토큰을 갱신합니다. 갱신마다 아주 작은 메시지 1개를 소모합니다.")
                     .font(.caption)
             }
 

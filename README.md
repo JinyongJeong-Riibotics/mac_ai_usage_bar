@@ -49,7 +49,8 @@ Codex는 공식 `codex app-server` 프로토콜로 계정 한도를 읽는다. C
 
 Claude Code는 백그라운드에서 토큰을 갱신하지 않으므로, 토큰 만료 시 앱이 해당 프로필의
 `claude -p ok`를 한 번 실행해 Claude Code가 스스로 갱신하게 한다. 앱은 파일과 키체인을
-읽기만 하며 refresh token을 복사하거나 직접 회전시키지 않는다.
+읽기만 하며 refresh token을 복사하거나 직접 회전시키지 않는다. 자동 갱신 프로세스는
+safe/restricted 모드, 무도구·무MCP·무세션 상태와 중립 임시 작업 디렉터리에서 실행된다.
 
 - **Codex** App Server 응답의 `rateLimitsByLimitId.codex`에서 `primary` / `secondary` 창을 읽는다.
   프로필은 순차 조회해 여러 계정이 동시에 요청을 몰아 보내지 않으며, 한 계정의 일시적 실패는
@@ -234,6 +235,18 @@ macOS의 Claude Code는 `claude` 실행 시 **키체인**을 갱신한다. 그�
 신원이 바뀌어 매번 다시 묻는다. 그래서 신원이 고정된 Apple 서명 도구 `/usr/bin/security`를
 거쳐 읽는다 — "항상 허용" 한 번이 앱 업데이트와 무관하게 영구히 유지된다.
 
+### Music·Documents 같은 폴더 접근을 요청한다
+
+앱의 사용량 조회에는 Music, Documents, Desktop, Downloads 접근이 필요하지 않다. 해당 요청은
+허용하지 않아도 된다. `v1.7.1`부터 Claude 자동 갱신은 사용자·프로젝트 설정, 플러그인, hooks,
+MCP, 내장 도구, Chrome 연동, 세션 저장을 모두 끄고 실행한다. Claude와 Codex 자식 프로세스의
+작업 디렉터리도 시스템 임시 폴더로 고정하며, 부모 앱의 `PWD`, 플러그인 경로, API 키 같은
+불필요한 환경변수를 전달하지 않는다.
+
+정상적으로 표시될 수 있는 권한 요청은 macOS 알림과 Claude 키체인 항목의 최초 읽기뿐이다.
+불필요한 폴더 권한을 이전 버전에서 허용했다면 시스템 설정 → 개인정보 보호 및 보안 →
+파일 및 폴더에서 AI Usage Bar의 해당 권한을 꺼도 된다.
+
 ### 인증이 자꾸 만료된다 / 터미널을 켜야만 유지된다
 
 Claude accessToken은 **약 8시간** 만에 만료되는데, **Claude Code는 백그라운드에서
@@ -243,7 +256,8 @@ Claude accessToken은 **약 8시간** 만에 만료되는데, **Claude Code는 �
 1. **신선한 쪽 읽기.** 앱은 파일과 키체인 중 만료가 더 나중인 쪽을 쓴다.
 2. **프로필별 CLI 자동 갱신**(설정: "터미널 없이 Claude 인증 유지", 기본 켜짐). 토큰이 만료돼
    조회가 실패하면 해당 계정의 `CLAUDE_CONFIG_DIR`로 `claude -p ok`를 실행해 Claude Code가
-   스스로 토큰을 갱신하게 한 뒤 다시 읽는다. 갱신마다 아주 작은 메시지 1개를 소모한다.
+   스스로 토큰을 갱신하게 한 뒤 다시 읽는다. 이 프로세스에는 파일·명령 도구나 사용자 플러그인을
+   제공하지 않으며, 갱신마다 아주 작은 메시지 1개를 소모한다.
    `usage-probe`의 "claude 실행파일" 줄로 앱이 `claude`를 찾는지 확인할 수 있다.
 
 - **앱은 어떤 Claude 자격증명도 쓰거나 복사하지 않는다.** refresh token은 회전식이므로 앱과
