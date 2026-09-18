@@ -83,6 +83,62 @@ struct SettingsView: View {
             }
 
             Section {
+                ForEach($settings.claudeAccounts) { $account in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Toggle("", isOn: $account.isEnabled)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .tint(.blue)
+                            TextField("표시 이름", text: $account.name)
+                            Button(role: .destructive) {
+                                settings.removeClaudeAccount(id: account.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(settings.claudeAccounts.count == 1)
+                            .help("계정 제거")
+                        }
+
+                        TextField("CLAUDE_CONFIG_DIR 경로",
+                                  text: $account.claudeConfigDirectoryPath)
+                            .font(.system(.caption, design: .monospaced))
+
+                        if settings.isDuplicateClaudePath(id: account.id) {
+                            Label("다른 Claude 계정과 같은 경로입니다. 중복 프로필은 조회하지 않습니다.",
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        }
+
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(account.loginCommand, forType: .string)
+                            copiedAccountID = account.id
+                        } label: {
+                            Label(copiedAccountID == account.id ? "복사됨" : "로그인 명령 복사",
+                                  systemImage: copiedAccountID == account.id
+                                    ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Button {
+                    settings.addClaudeAccount()
+                } label: {
+                    Label("Claude 계정 추가", systemImage: "plus")
+                }
+            } header: {
+                Text("Claude 계정")
+            } footer: {
+                Text("계정마다 별도 CLAUDE_CONFIG_DIR과 macOS 키체인 항목을 사용합니다. 로그인 명령을 터미널에서 실행해 각 프로필을 인증하세요. 기본 ~/.claude 계정은 기존 로그인을 그대로 사용합니다.")
+                    .font(.caption)
+            }
+
+            Section {
                 Toggle("터미널 없이 Claude 인증 유지", isOn: $settings.claudeAutoRefreshViaCLI)
                     .toggleStyle(.switch)
                     .tint(.blue)
@@ -139,7 +195,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440, height: 720)
+        .frame(width: 460, height: 780)
     }
 
     private func intervalLabel(_ seconds: Double) -> String {

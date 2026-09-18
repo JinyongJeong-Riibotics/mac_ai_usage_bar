@@ -13,6 +13,10 @@ struct MenuContentView: View {
         settings.showCodex ? settings.enabledCodexAccounts : []
     }
 
+    private var claudeAccounts: [ClaudeAccount] {
+        settings.showClaude ? settings.enabledClaudeAccounts : []
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -29,15 +33,18 @@ struct MenuContentView: View {
                     Divider().padding(.horizontal, 14)
                 }
             }
-            if !codexAccounts.isEmpty && settings.showClaude {
+            if !codexAccounts.isEmpty && !claudeAccounts.isEmpty {
                 Divider().padding(.horizontal, 14)
             }
-            if settings.showClaude {
-                ProviderSection(title: "Claude", systemImage: "sparkle",
-                                usage: store.claude, settings: settings,
-                                notice: store.claudeNotice)
+            ForEach(claudeAccounts) { account in
+                ProviderSection(title: account.displayName, systemImage: "sparkle",
+                                usage: store.claudeByAccount[account.id], settings: settings,
+                                notice: store.claudeNotices[account.id])
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
+                if account.id != claudeAccounts.last?.id {
+                    Divider().padding(.horizontal, 14)
+                }
             }
 
             Divider()

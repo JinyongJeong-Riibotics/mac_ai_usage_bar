@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import UsageCore
 
 enum DisplayMode: String, CaseIterable, Identifiable {
     case used, remaining
@@ -39,6 +40,49 @@ struct CodexAccount: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+struct ClaudeAccount: Codable, Identifiable, Hashable, Sendable {
+    var id: UUID
+    var name: String
+    var claudeConfigDirectoryPath: String
+    var isEnabled: Bool
+
+    static let defaultAccount = ClaudeAccount(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+        name: "Claude",
+        claudeConfigDirectoryPath: ClaudeReader.defaultConfigDirectoryPath,
+        isEnabled: true
+    )
+
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Claude" : trimmed
+    }
+
+    var resolvedConfigDirectoryPath: String {
+        ClaudeReader.resolvedConfigDirectory(for: claudeConfigDirectoryPath).path
+    }
+
+    var loginCommand: String {
+        let quotedPath = "'" + resolvedConfigDirectoryPath
+            .replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let unset = [
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ].map { "-u \($0)" }.joined(separator: " ")
+        let config = resolvedConfigDirectoryPath
+            == ClaudeReader.resolvedConfigDirectory().path
+            ? ""
+            : "CLAUDE_CONFIG_DIR=\(quotedPath) "
+        return "mkdir -p \(quotedPath) && env \(unset) \(config)claude auth login --claudeai"
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
@@ -48,6 +92,7 @@ final class AppSettings: ObservableObject {
     @Published var showCodex: Bool { didSet { defaults.set(showCodex, forKey: Keys.showCodex) } }
     @Published var showClaude: Bool { didSet { defaults.set(showClaude, forKey: Keys.showClaude) } }
     @Published var codexAccounts: [CodexAccount] { didSet { persistCodexAccounts() } }
+    @Published var claudeAccounts: [ClaudeAccount] { didSet { persistClaudeAccounts() } }
     @Published var launchAtLogin: Bool { didSet { applyLoginItem() } }
     @Published var loginItemError: String?
 
@@ -63,9 +108,9 @@ final class AppSettings: ObservableObject {
     @Published var colorMenuBar: Bool { didSet { defaults.set(colorMenuBar, forKey: Keys.colorMenuBar) } }
     @Published var warnThreshold: Double { didSet { defaults.set(warnThreshold, forKey: Keys.warnThreshold) } }
 
-    // When the Claude token has expired and can't be refreshed from the file,
-    // run `claude -p` so Claude Code refreshes its own login. Keeps auth alive
-    // without opening a terminal, at the cost of one tiny message per refresh.
+    // When a Claude profile's token expires, run `claude -p` with that profile's
+    // environment so Claude Code refreshes its own login. The app never writes
+    // credentials itself; each refresh costs one tiny message.
     @Published var claudeAutoRefreshViaCLI: Bool { didSet { defaults.set(claudeAutoRefreshViaCLI, forKey: Keys.claudeAutoRefreshViaCLI) } }
 
     var cautionThreshold: Double { max(0, warnThreshold - 15) }
@@ -81,6 +126,7 @@ final class AppSettings: ObservableObject {
         static let showCodex = "showCodex"
         static let showClaude = "showClaude"
         static let codexAccounts = "codexAccounts"
+        static let claudeAccounts = "claudeAccounts"
         static let codexInterval = "codexInterval"
         static let claudeInterval = "claudeInterval"
         static let notificationsEnabled = "notificationsEnabled"
@@ -101,6 +147,15 @@ final class AppSettings: ObservableObject {
         } else {
             codexAccounts = [.defaultAccount]
         }
+        if let data = defaults.data(forKey: Keys.claudeAccounts),
+           let saved = try? JSONDecoder().decode([ClaudeAccount].self, from: data),
+           !saved.isEmpty {
+            claudeAccounts = saved
+        } else {
+            // Migration from every pre-multi-account release: retain the
+            // existing ~/.claude login as the first profile.
+            claudeAccounts = [.defaultAccount]
+        }
         let codex = defaults.object(forKey: Keys.codexInterval) as? Double ?? 60
         let claude = defaults.object(forKey: Keys.claudeInterval) as? Double ?? 300
         codexInterval = max(AppSettings.codexMinInterval, codex)
@@ -114,6 +169,13 @@ final class AppSettings: ObservableObject {
 
     var enabledCodexAccounts: [CodexAccount] {
         codexAccounts.filter(\.isEnabled)
+    }
+
+    var enabledClaudeAccounts: [ClaudeAccount] {
+        var seenPaths = Set<String>()
+        return claudeAccounts.filter { account in
+            account.isEnabled && seenPaths.insert(account.resolvedConfigDirectoryPath).inserted
+        }
     }
 
     func addCodexAccount() {
@@ -133,9 +195,42 @@ final class AppSettings: ObservableObject {
         codexAccounts.removeAll { $0.id == id }
     }
 
+    func addClaudeAccount() {
+        var number = 2
+        let existingPaths = Set(claudeAccounts.map(\.resolvedConfigDirectoryPath))
+        while existingPaths.contains(ClaudeReader.resolvedConfigDirectory(
+            for: "~/.claude-accounts/account-\(number)"
+        ).path) {
+            number += 1
+        }
+        claudeAccounts.append(ClaudeAccount(
+            id: UUID(),
+            name: "Claude \(number)",
+            claudeConfigDirectoryPath: "~/.claude-accounts/account-\(number)",
+            isEnabled: true
+        ))
+    }
+
+    func removeClaudeAccount(id: UUID) {
+        guard claudeAccounts.count > 1 else { return }
+        claudeAccounts.removeAll { $0.id == id }
+    }
+
+    func isDuplicateClaudePath(id: UUID) -> Bool {
+        guard let account = claudeAccounts.first(where: { $0.id == id }) else { return false }
+        return claudeAccounts.filter {
+            $0.resolvedConfigDirectoryPath == account.resolvedConfigDirectoryPath
+        }.count > 1
+    }
+
     private func persistCodexAccounts() {
         guard let data = try? JSONEncoder().encode(codexAccounts) else { return }
         defaults.set(data, forKey: Keys.codexAccounts)
+    }
+
+    private func persistClaudeAccounts() {
+        guard let data = try? JSONEncoder().encode(claudeAccounts) else { return }
+        defaults.set(data, forKey: Keys.claudeAccounts)
     }
 
     /// Register/unregister the app as a login item. This only takes effect for a

@@ -90,52 +90,49 @@ final class CodexParseTests: XCTestCase {
     }
 }
 
-final class ClaudeRefreshMergeTests: XCTestCase {
-    private let now = Date(timeIntervalSince1970: 1_785_000_000)
-
-    func testMergePreservesOtherFieldsAndRotates() throws {
-        let original: [String: Any] = [
-            "claudeAiOauth": [
-                "accessToken": "old-at", "refreshToken": "old-rt",
-                "expiresAt": 1, "subscriptionType": "max",
-                "scopes": ["user:inference"],
-            ],
-            "someTopLevel": "keep-me",
-        ]
-        let oldOAuth = original["claudeAiOauth"] as! [String: Any]
-        let response: [String: Any] = [
-            "access_token": "new-at", "refresh_token": "new-rt", "expires_in": 28800.0,
-        ]
-        let data = try XCTUnwrap(ClaudeReader.mergedCredentials(
-            original: original, oldOAuth: oldOAuth, response: response, now: now))
-        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let oauth = obj["claudeAiOauth"] as! [String: Any]
-
-        XCTAssertEqual(oauth["accessToken"] as? String, "new-at")
-        XCTAssertEqual(oauth["refreshToken"] as? String, "new-rt")     // rotated
-        XCTAssertEqual(oauth["subscriptionType"] as? String, "max")     // preserved
-        XCTAssertEqual(oauth["scopes"] as? [String], ["user:inference"])// preserved
-        XCTAssertEqual(obj["someTopLevel"] as? String, "keep-me")       // preserved
-        // expiresAt = now + expires_in, in ms.
-        XCTAssertEqual(oauth["expiresAt"] as? Int, Int((now.timeIntervalSince1970 + 28800) * 1000))
-        // The new token must parse back out.
-        XCTAssertEqual(ClaudeReader.parseToken(from: data), "new-at")
+final class ClaudeProfileTests: XCTestCase {
+    func testDefaultProfileKeepsLegacyKeychainService() {
+        XCTAssertEqual(ClaudeReader.keychainService(configDirectoryPath: "~/.claude"),
+                       "Claude Code-credentials")
+        XCTAssertEqual(ClaudeReader.keychainService(
+            configDirectoryPath: ClaudeReader.resolvedConfigDirectory().path
+        ), "Claude Code-credentials")
     }
 
-    // Server may omit refresh_token (non-rotating); keep the old one.
-    func testMergeKeepsOldRefreshWhenResponseOmitsIt() throws {
-        let oldOAuth: [String: Any] = ["accessToken": "old", "refreshToken": "keep-rt"]
-        let data = try XCTUnwrap(ClaudeReader.mergedCredentials(
-            original: ["claudeAiOauth": oldOAuth],
-            oldOAuth: oldOAuth,
-            response: ["access_token": "new"], now: now))
-        let oauth = (try JSONSerialization.jsonObject(with: data) as! [String: Any])["claudeAiOauth"] as! [String: Any]
-        XCTAssertEqual(oauth["refreshToken"] as? String, "keep-rt")
+    func testCustomProfileUsesClaudeCodeCompatibleHash() {
+        XCTAssertEqual(ClaudeReader.keychainService(
+            configDirectoryPath: "/tmp/claude-profile"
+        ), "Claude Code-credentials-7182514b")
     }
 
-    func testMergeRejectsTokenlessResponse() {
-        XCTAssertNil(ClaudeReader.mergedCredentials(
-            original: [:], oldOAuth: [:], response: ["error": "bad"], now: now))
+    func testCredentialsFileBelongsToSelectedProfile() {
+        XCTAssertEqual(ClaudeReader.credentialsURL(
+            configDirectoryPath: "/tmp/claude-profile"
+        ).path, "/tmp/claude-profile/.credentials.json")
+    }
+
+    func testClaudeEnvironmentIsolatesProfilesAndAuthOverrides() {
+        let custom = ClaudeReader.claudeEnvironment(
+            configDirectoryPath: "/tmp/claude-profile",
+            inherited: [
+                "PATH": "/usr/bin",
+                "CLAUDE_CONFIG_DIR": "/wrong",
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/shared",
+                "CLAUDE_CODE_OAUTH_TOKEN": "wrong-token",
+                "ANTHROPIC_API_KEY": "wrong-key",
+            ]
+        )
+        XCTAssertEqual(custom["CLAUDE_CONFIG_DIR"], "/tmp/claude-profile")
+        XCTAssertEqual(custom["PATH"], "/usr/bin")
+        XCTAssertNil(custom["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+        XCTAssertNil(custom["CLAUDE_CODE_OAUTH_TOKEN"])
+        XCTAssertNil(custom["ANTHROPIC_API_KEY"])
+
+        let defaultProfile = ClaudeReader.claudeEnvironment(
+            configDirectoryPath: "~/.claude",
+            inherited: ["CLAUDE_CONFIG_DIR": "/wrong"]
+        )
+        XCTAssertNil(defaultProfile["CLAUDE_CONFIG_DIR"])
     }
 }
 
