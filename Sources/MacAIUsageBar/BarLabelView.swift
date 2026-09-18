@@ -31,7 +31,11 @@ struct BarLabelView: View {
                 segment(account.displayName, store.codexByAccount[account.id])
             })
         }
-        if settings.showClaude { result.append(segment("Claude", store.claude)) }
+        if settings.showClaude {
+            result.append(contentsOf: settings.enabledClaudeAccounts.map { account in
+                segment(account.displayName, store.claudeByAccount[account.id])
+            })
+        }
         return result
     }
 

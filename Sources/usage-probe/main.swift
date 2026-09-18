@@ -43,13 +43,15 @@ func environmentReport() {
 
     print("  codex 프로필: \(CodexReader.diagnosticProfile(codexHome))")
     print("  codex 실행파일: \(CodexReader.diagnosticCodexBinary())")
-    print("  claude 인증:  \(ClaudeReader.diagnosticCredentialSource())")
+    print("  claude 프로필: \(ClaudeReader.diagnosticCredentialSource(configDirectoryPath: claudeConfigDirectory))")
     print("  claude 실행파일: \(ClaudeReader.diagnosticClaudeBinary())")
     print()
 }
 
 let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"]
     ?? CodexReader.defaultHomePath
+let claudeConfigDirectory = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+    ?? ClaudeReader.defaultConfigDirectoryPath
 environmentReport()
 report(CodexReader.fetch(codexHomePath: codexHome))
-report(ClaudeReader.fetch())
+report(ClaudeReader.fetch(configDirectoryPath: claudeConfigDirectory))

@@ -17,25 +17,6 @@ enum HTTP {
         send(url, method: "GET", headers: headers, body: nil, timeout: timeout)
     }
 
-    /// Form-encoded POST, used for the OAuth token refresh.
-    static func postForm(_ url: URL,
-                         fields: [String: String],
-                         headers: [String: String] = [:],
-                         timeout: TimeInterval) -> Response {
-        let body = fields.map { key, value in
-            "\(formEncode(key))=\(formEncode(value))"
-        }.joined(separator: "&").data(using: .utf8)
-        var h = headers
-        h["Content-Type"] = "application/x-www-form-urlencoded"
-        return send(url, method: "POST", headers: h, body: body, timeout: timeout)
-    }
-
-    private static func formEncode(_ s: String) -> String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
-    }
-
     private static func send(_ url: URL,
                              method: String,
                              headers: [String: String],
@@ -73,10 +54,14 @@ final class ResponseBox: @unchecked Sendable {
 /// tool: because `security` has a stable Apple code signature, the one-time
 /// "Always Allow" the user grants sticks across our (ad-hoc, ever-changing) app
 /// signature — reading the item in-process would re-prompt after every update.
-func runCommand(_ path: String, _ args: [String], timeout: TimeInterval = 10) -> String? {
+func runCommand(_ path: String,
+                _ args: [String],
+                timeout: TimeInterval = 10,
+                environment: [String: String]? = nil) -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: path)
     process.arguments = args
+    process.environment = environment
     let out = Pipe()
     process.standardOutput = out
     process.standardError = FileHandle.nullDevice

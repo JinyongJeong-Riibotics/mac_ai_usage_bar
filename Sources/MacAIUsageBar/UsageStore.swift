@@ -12,8 +12,8 @@ final class UsageStore: ObservableObject {
 
     @Published var codexByAccount: [UUID: ProviderUsage] = [:]
     @Published var codexNotices: [UUID: String] = [:]
-    @Published var claude: ProviderUsage?
-    @Published var claudeNotice: String?
+    @Published var claudeByAccount: [UUID: ProviderUsage] = [:]
+    @Published var claudeNotices: [UUID: String] = [:]
     @Published var lastRefresh: Date?
 
     private let settings = AppSettings.shared
@@ -28,6 +28,8 @@ final class UsageStore: ObservableObject {
     private var didStart = false
     private var isCodexRefreshing = false
     private var codexRefreshPending = false
+    private var isClaudeRefreshing = false
+    private var claudeRefreshPending = false
 
     // Multiplies the Claude interval after a 429 so we back off automatically,
     // resetting to 1 on the next success. Capped so we never stall forever.
@@ -64,6 +66,21 @@ final class UsageStore: ObservableObject {
             settings.$claudeInterval
                 .dropFirst()
                 .sink { [weak self] _ in Task { @MainActor in self?.scheduleClaude() } }
+                .store(in: &cancellables)
+            settings.$claudeAccounts
+                .dropFirst()
+                .debounce(for: .milliseconds(600), scheduler: RunLoop.main)
+                .sink { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.pruneClaudeState()
+                        if self.isClaudeRefreshing {
+                            self.claudeRefreshPending = true
+                        } else {
+                            self.refreshClaude(force: true)
+                        }
+                    }
+                }
                 .store(in: &cancellables)
         }
         refreshAll()
@@ -185,37 +202,77 @@ final class UsageStore: ObservableObject {
     private let claudeThrottle: TimeInterval = 60
 
     func refreshClaude(force: Bool = false) {
+        guard !isClaudeRefreshing else { return }
         if !force, let last = lastClaudeFetch,
            Date().timeIntervalSince(last) < claudeThrottle {
             return
         }
+        let accounts = settings.enabledClaudeAccounts
+        pruneClaudeState()
+        guard !accounts.isEmpty else { return }
         lastClaudeFetch = Date()
         let cliRefresh = settings.claudeAutoRefreshViaCLI
+        isClaudeRefreshing = true
         Task.detached(priority: .utility) {
-            let usage = ClaudeReader.fetch(cliRefresh: cliRefresh)
+            // Query sequentially to avoid multiplying the usage endpoint's
+            // aggressive rate-limit burst when several profiles are enabled.
+            let results = accounts.map { account in
+                ClaudeFetchResult(
+                    accountID: account.id,
+                    accountName: account.displayName,
+                    usage: ClaudeReader.fetch(
+                        configDirectoryPath: account.claudeConfigDirectoryPath,
+                        cliRefresh: cliRefresh
+                    )
+                )
+            }
             await MainActor.run {
+                self.isClaudeRefreshing = false
                 self.lastRefresh = Date()
-                // Don't let a transient error (e.g. 429) erase the last good
-                // reading — keep showing it and surface the error as a notice.
-                if usage.fiveHour != nil || usage.weekly != nil {
-                    self.claude = usage
-                    self.claudeNotice = nil
-                    self.notifier.evaluate(usage, settings: self.settings)
-                } else {
-                    self.claudeNotice = usage.error
-                    if self.claude == nil { self.claude = usage }
+                let activeIDs = Set(self.settings.enabledClaudeAccounts.map(\.id))
+                for result in results where activeIDs.contains(result.accountID) {
+                    let usage = result.usage
+                    // A transient error must not erase the last good value for
+                    // this profile or affect another profile's state.
+                    if usage.fiveHour != nil || usage.weekly != nil {
+                        self.claudeByAccount[result.accountID] = usage
+                        self.claudeNotices[result.accountID] = nil
+                        self.notifier.evaluate(
+                            usage,
+                            settings: self.settings,
+                            sourceID: result.accountID.uuidString,
+                            displayName: result.accountName
+                        )
+                    } else {
+                        self.claudeNotices[result.accountID] = usage.error
+                        if self.claudeByAccount[result.accountID] == nil {
+                            self.claudeByAccount[result.accountID] = usage
+                        }
+                    }
                 }
-                self.handleClaudeResult(usage)
+                self.handleClaudeResults(results.map(\.usage))
+                if self.claudeRefreshPending {
+                    self.claudeRefreshPending = false
+                    self.refreshClaude(force: true)
+                }
             }
         }
+    }
+
+    private func pruneClaudeState() {
+        let activeIDs = Set(settings.enabledClaudeAccounts.map(\.id))
+        claudeByAccount = claudeByAccount.filter { activeIDs.contains($0.key) }
+        claudeNotices = claudeNotices.filter { activeIDs.contains($0.key) }
     }
 
     /// On a 429 we grow the backoff and reschedule further out; any other outcome
     /// resets it. Claude uses a non-repeating timer so each fire re-arms with the
     /// current (possibly backed-off) interval.
-    private func handleClaudeResult(_ usage: ProviderUsage) {
-        let rateLimited = (usage.error?.contains("429") ?? false)
-            || (usage.error?.contains("rate limited") ?? false)
+    private func handleClaudeResults(_ usages: [ProviderUsage]) {
+        let rateLimited = usages.contains { usage in
+            (usage.error?.contains("429") ?? false)
+                || (usage.error?.contains("rate limited") ?? false)
+        }
         if rateLimited {
             claudeBackoff = min(maxBackoff, claudeBackoff * 2)
         } else {
@@ -233,6 +290,12 @@ final class UsageStore: ObservableObject {
 }
 
 private struct CodexFetchResult: Sendable {
+    let accountID: UUID
+    let accountName: String
+    let usage: ProviderUsage
+}
+
+private struct ClaudeFetchResult: Sendable {
     let accountID: UUID
     let accountName: String
     let usage: ProviderUsage

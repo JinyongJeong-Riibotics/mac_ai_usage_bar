@@ -1,109 +1,136 @@
+import CryptoKit
 import Foundation
 
 /// Reads Claude subscription usage from the authenticated OAuth usage endpoint.
-/// The 5h/weekly utilization Claude shows in `/usage` is not written to local
-/// files, so we call `GET /api/oauth/usage` with the Bearer token Claude Code
-/// keeps refreshed in `~/.claude/.credentials.json` — the CLI's own login, a
-/// `0600` file. The endpoint rate limits aggressively without a
-/// `claude-code/<version>` User-Agent, so poll no more than ~once per 3 minutes.
 ///
-/// Where the token lives depends on the machine: Claude Code writes it to the
-/// login **keychain** by default on macOS, but on installs that also keep
-/// `~/.claude/.credentials.json` the file is what stays current (measured: on a
-/// machine with both, the keychain copy went a month stale while the file was
-/// refreshed hourly). So we read the **file first**, then fall back to the
-/// keychain via `/usr/bin/security`.
-///
-/// We shell out to `security` rather than call `SecItemCopyMatching` in-process
-/// on purpose. macOS attributes the one-time "Always Allow" to the *requesting*
-/// binary. `security` has a stable Apple signature, so that grant persists
-/// forever; our ad-hoc app signature changes every build, so an in-process read
-/// would re-prompt after every update. This is how other menu-bar apps
-/// "auto-connect" to Claude Code.
+/// Claude Code isolates accounts with `CLAUDE_CONFIG_DIR`. On macOS, custom
+/// config directories also get a directory-specific keychain service. The app
+/// mirrors that lookup, but never writes or refreshes credentials itself:
+/// Claude Code remains the sole credential writer and is invoked for a small
+/// `claude -p ok` request only when a profile needs its token refreshed.
 public enum ClaudeReader {
+    public static let defaultConfigDirectoryPath = "~/.claude"
+
     static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    static let defaultKeychainService = "Claude Code-credentials"
 
-    static let keychainService = "Claude Code-credentials"
-
-    static var credentialsURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.credentials.json")
+    /// Expand and standardize a configured path exactly once. The resulting
+    /// absolute, NFC-normalized string is used both for `CLAUDE_CONFIG_DIR` and
+    /// for the keychain-service hash, so the two can never drift apart.
+    public static func resolvedConfigDirectory(
+        for configuredPath: String = defaultConfigDirectoryPath
+    ) -> URL {
+        let trimmed = configuredPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = trimmed.isEmpty ? defaultConfigDirectoryPath : trimmed
+        let expanded = (raw as NSString).expandingTildeInPath
+        let absolute: String
+        if (expanded as NSString).isAbsolutePath {
+            absolute = expanded
+        } else {
+            absolute = URL(fileURLWithPath: FileManager.default.currentDirectoryPath,
+                           isDirectory: true)
+                .appendingPathComponent(expanded, isDirectory: true).path
+        }
+        let standardized = URL(fileURLWithPath: absolute, isDirectory: true)
+            .standardizedFileURL.path.precomposedStringWithCanonicalMapping
+        return URL(fileURLWithPath: standardized, isDirectory: true)
     }
 
-    /// Read the token from whichever store is **freshest** (latest `expiresAt`).
-    ///
-    /// Claude Code on macOS keeps the **keychain** current (it refreshes there when you run
-    /// `claude`), so the app must read the keychain — not a stale file copy.
-    ///
-    /// An earlier version materialised a file from the keychain and then only
-    /// ever read that file; running `claude` refreshed the keychain but the app
-    /// kept showing the frozen file, so it looked permanently expired. Picking
-    /// the fresher of the two fixes that: the moment `claude` refreshes the
-    /// keychain, the app sees it. We consult the keychain only when the file
-    /// isn't clearly fresh, to avoid spawning `security` on every healthy poll.
-    static func loadCredentials() -> (data: Data, source: String)? {
-        let fileData = (try? Data(contentsOf: credentialsURL))
+    static var defaultConfigDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    static func isDefaultConfigDirectory(_ configuredPath: String) -> Bool {
+        resolvedConfigDirectory(for: configuredPath).path
+            == defaultConfigDirectory.path.precomposedStringWithCanonicalMapping
+    }
+
+    static func credentialsURL(configDirectoryPath: String) -> URL {
+        resolvedConfigDirectory(for: configDirectoryPath)
+            .appendingPathComponent(".credentials.json", isDirectory: false)
+    }
+
+    /// Claude Code 2.1.x appends the first eight SHA-256 hex characters of the
+    /// normalized absolute config-directory path for non-default profiles.
+    static func keychainService(configDirectoryPath: String) -> String {
+        guard !isDefaultConfigDirectory(configDirectoryPath) else {
+            return defaultKeychainService
+        }
+        let path = resolvedConfigDirectory(for: configDirectoryPath).path
+            .precomposedStringWithCanonicalMapping
+        let digest = SHA256.hash(data: Data(path.utf8))
+        let suffix = digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+        return "\(defaultKeychainService)-\(suffix)"
+    }
+
+    /// Read the token from the freshest store for one Claude profile. Claude
+    /// may use either the profile's `.credentials.json` fallback or its macOS
+    /// keychain entry, so both remain supported without copying between them.
+    static func loadCredentials(
+        configDirectoryPath: String = defaultConfigDirectoryPath,
+        forceKeychainRead: Bool = false
+    ) -> (data: Data, source: String)? {
+        let fileURL = credentialsURL(configDirectoryPath: configDirectoryPath)
+        let fileData = (try? Data(contentsOf: fileURL))
             .flatMap { parseToken(from: $0) != nil ? $0 : nil }
         let fileExpiry = fileData.flatMap { expiresAt(from: $0) } ?? .distantPast
 
         var keychainData: Data?
-        if fileData == nil || fileExpiry.timeIntervalSinceNow < 1800 {
+        if forceKeychainRead || fileData == nil || fileExpiry.timeIntervalSinceNow < 1800 {
+            let service = keychainService(configDirectoryPath: configDirectoryPath)
             if let raw = runCommand("/usr/bin/security",
-                                    ["find-generic-password", "-s", keychainService, "-w"]),
+                                    ["find-generic-password", "-s", service, "-w"]),
                let data = raw.data(using: .utf8), parseToken(from: data) != nil {
                 keychainData = data
             }
         }
         let keychainExpiry = keychainData.flatMap { expiresAt(from: $0) } ?? .distantPast
 
-        // Freshest wins; ties go to the file (no keychain prompt, self-refreshable).
+        // Ties go to the file to avoid an unnecessary keychain access prompt.
         if let fileData, fileExpiry >= keychainExpiry { return (fileData, "file") }
         if let keychainData { return (keychainData, "keychain") }
         if let fileData { return (fileData, "file") }
         return nil
     }
 
-    /// Multi-line summary for `usage-probe`. Shows both stores' freshness so a
-    /// "still expired after running claude" case is self-explaining. No secrets.
-    public static func diagnosticCredentialSource() -> String {
+    /// Diagnostic summary for `usage-probe`; never includes token values.
+    public static func diagnosticCredentialSource(
+        configDirectoryPath: String = defaultConfigDirectoryPath
+    ) -> String {
         func expiryText(_ data: Data?) -> String {
             guard let data, parseToken(from: data) != nil else { return "없음/해석불가" }
             guard let expiry = expiresAt(from: data) else { return "만료시각 미상" }
-            let h = expiry.timeIntervalSinceNow / 3600
-            return h > 0 ? String(format: "만료 %.1fh 후", h) : String(format: "%.1fh 전 만료", -h)
+            let hours = expiry.timeIntervalSinceNow / 3600
+            return hours > 0
+                ? String(format: "만료 %.1fh 후", hours)
+                : String(format: "%.1fh 전 만료", -hours)
         }
-        let fileData = try? Data(contentsOf: credentialsURL)
+
+        let fileURL = credentialsURL(configDirectoryPath: configDirectoryPath)
+        let service = keychainService(configDirectoryPath: configDirectoryPath)
+        let fileData = try? Data(contentsOf: fileURL)
         let keychainData = runCommand("/usr/bin/security",
-            ["find-generic-password", "-s", keychainService, "-w"])?.data(using: .utf8)
+            ["find-generic-password", "-s", service, "-w"])?.data(using: .utf8)
 
-        guard let (chosen, source) = loadCredentials() else {
-            return "파일·키체인 어디에도 없음 — 해당 PC에서 `claude` 로그인 필요"
+        guard let (chosen, source) = loadCredentials(configDirectoryPath: configDirectoryPath) else {
+            return "\(resolvedConfigDirectory(for: configDirectoryPath).path) · 파일·키체인 없음"
         }
-        let usedExpiry = expiryText(chosen)
-        return "사용: \(source) (\(usedExpiry)) | 파일: \(expiryText(fileData)) | 키체인: \(expiryText(keychainData))"
-    }
-
-    /// The token is read fresh on every call so we always use the value Claude
-    /// Code most recently refreshed, and it never lives anywhere but memory.
-    static func accessToken() -> String? {
-        guard let (data, _) = loadCredentials() else { return nil }
-        return parseToken(from: data)
+        return "\(resolvedConfigDirectory(for: configDirectoryPath).path) · 사용: \(source) "
+            + "(\(expiryText(chosen))) | 파일: \(expiryText(fileData)) | "
+            + "키체인: \(expiryText(keychainData))"
     }
 
     // MARK: - Refresh via the Claude Code CLI
 
-    /// Throttle so a run of failures can't spawn `claude` repeatedly. Only ever
-    /// touched from the serialized Claude fetch, so unsynchronized access is safe.
-    nonisolated(unsafe) static var lastCLIRefresh: Date?
+    private static let cliRefreshLock = NSLock()
+    nonisolated(unsafe) static var lastCLIRefreshByProfile: [String: Date] = [:]
 
-    /// For `usage-probe`: whether the CLI-refresh path can find `claude`.
     public static func diagnosticClaudeBinary() -> String {
         locateClaudeBinary() ?? "claude 실행파일 못 찾음 (터미널 없이 갱신 불가)"
     }
 
-    /// Find the `claude` executable. GUI apps launch with a minimal PATH, so we
-    /// check the usual install locations first, then fall back to the user's
-    /// login shell to resolve whatever `claude` they actually use.
     static func locateClaudeBinary() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
@@ -123,117 +150,67 @@ public enum ClaudeReader {
         return nil
     }
 
-    /// Ask Claude Code to refresh its own token by making one tiny print-mode
-    /// call. This is the keychain-safe way to stay logged in without a terminal:
-    /// Claude Code rotates and rewrites its own credential (keychain on macOS),
-    /// and we just read the fresh value afterwards — we never write the keychain.
-    ///
-    /// Costs one trivial message, so it's throttled and only used as a last
-    /// resort when the token has actually expired. Returns true if `claude` ran.
-    @discardableResult
-    static func triggerCLIRefresh(now: Date = Date(), timeout: TimeInterval = 45) -> Bool {
-        if let last = lastCLIRefresh, now.timeIntervalSince(last) < 1800 { return false }
-        guard let claude = locateClaudeBinary() else { return false }
-        lastCLIRefresh = now
-        _ = runCommand(claude, ["-p", "ok"], timeout: timeout)
-        return true
+    /// Remove ambient authentication/provider overrides before selecting the
+    /// requested profile. The default profile deliberately leaves
+    /// `CLAUDE_CONFIG_DIR` unset so existing `Claude Code-credentials` logins
+    /// keep working; custom profiles receive their normalized absolute path.
+    static func claudeEnvironment(
+        configDirectoryPath: String,
+        inherited: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var environment = inherited
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ] {
+            environment.removeValue(forKey: key)
+        }
+        if isDefaultConfigDirectory(configDirectoryPath) {
+            environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
+        } else {
+            environment["CLAUDE_CONFIG_DIR"] = resolvedConfigDirectory(
+                for: configDirectoryPath
+            ).path
+        }
+        return environment
     }
 
-    /// `expiresAt` is epoch **milliseconds**; used only to explain a 401.
+    /// Ask Claude Code to refresh exactly one profile. Each profile has its own
+    /// 30-minute throttle so a failing account cannot suppress another account.
+    @discardableResult
+    static func triggerCLIRefresh(configDirectoryPath: String = defaultConfigDirectoryPath,
+                                  now: Date = Date(),
+                                  timeout: TimeInterval = 45) -> Bool {
+        guard let claude = locateClaudeBinary() else { return false }
+        let profileKey = resolvedConfigDirectory(for: configDirectoryPath).path
+        cliRefreshLock.lock()
+        if let last = lastCLIRefreshByProfile[profileKey], now.timeIntervalSince(last) < 1800 {
+            cliRefreshLock.unlock()
+            return false
+        }
+        lastCLIRefreshByProfile[profileKey] = now
+        cliRefreshLock.unlock()
+
+        return runCommand(claude, ["-p", "ok"], timeout: timeout,
+                          environment: claudeEnvironment(
+                            configDirectoryPath: configDirectoryPath
+                          )) != nil
+    }
+
+    /// `expiresAt` is epoch milliseconds; used only to explain authentication
+    /// failures without revealing credential contents.
     static func expiresAt(from data: Data) -> Date? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any] else { return nil }
-        let ms = doubleVal(oauth["expiresAt"])
-        return ms > 0 ? Date(timeIntervalSince1970: ms / 1000) : nil
-    }
-
-    // MARK: - Token refresh
-
-    /// Public OAuth client id Claude Code uses (extracted from the CLI). The
-    /// refresh grant needs it alongside the refresh token.
-    static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    /// `platform.claude.com` is Cloudflare-gated against non-browser callers;
-    /// `api.anthropic.com` serves the same token grant and accepts our request.
-    static let tokenURL = URL(string: "https://api.anthropic.com/v1/oauth/token")!
-
-    /// Refresh the access token in `~/.claude/.credentials.json` when it is near
-    /// expiry, so the app keeps working without the user running `claude`.
-    ///
-    /// We do this **only when credentials live in the file** — never when they
-    /// came from the keychain. The refresh token rotates: refreshing invalidates
-    /// the previous one, so if we refreshed the keychain's token out from under
-    /// Claude Code, its own next run could be forced to re-login. Owning the file
-    /// copy keeps our rotation isolated from Claude Code's keychain copy.
-    ///
-    /// Returns the fresh access token when a refresh happened, else nil.
-    @discardableResult
-    static func refreshIfNeeded(force: Bool = false, timeout: TimeInterval = 15) -> String? {
-        // Only the file is safe to rotate (see above).
-        guard let data = try? Data(contentsOf: credentialsURL),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = obj["claudeAiOauth"] as? [String: Any],
-              let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty
-        else { return nil }
-
-        // Refresh only within 10 min of expiry (or when forced by a 401), so we
-        // don't rotate needlessly and race Claude Code's own refresh-on-run.
-        if !force, let expiry = expiresAt(from: data),
-           expiry.timeIntervalSinceNow > 600 { return nil }
-
-        let response = HTTP.postForm(tokenURL, fields: [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": oauthClientID,
-        ], headers: ["Accept": "application/json"], timeout: timeout)
-
-        guard response.status == 200, let body = response.data,
-              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let newAccess = json["access_token"] as? String, !newAccess.isEmpty
-        else { return nil }
-
-        guard let merged = mergedCredentials(original: obj, oldOAuth: oauth,
-                                             response: json, now: Date()) else { return nil }
-        writeBack(merged)
-        return newAccess
-    }
-
-    /// Pure: fold the token response into the existing credentials JSON,
-    /// preserving every other field (both top-level and inside `claudeAiOauth`),
-    /// and return the bytes to persist. Returns nil if the response lacks a token.
-    /// Split out from the file write so it can be unit-tested.
-    static func mergedCredentials(original: [String: Any],
-                                  oldOAuth: [String: Any],
-                                  response: [String: Any],
-                                  now: Date) -> Data? {
-        guard let newAccess = response["access_token"] as? String, !newAccess.isEmpty else {
-            return nil
-        }
-        var oauth = oldOAuth
-        oauth["accessToken"] = newAccess
-        if let newRefresh = response["refresh_token"] as? String, !newRefresh.isEmpty {
-            oauth["refreshToken"] = newRefresh
-        }
-        if let expiresIn = response["expires_in"] as? Double {
-            oauth["expiresAt"] = Int(now.timeIntervalSince1970 * 1000 + expiresIn * 1000)
-        }
-        var merged = original
-        merged["claudeAiOauth"] = oauth
-        return try? JSONSerialization.data(withJSONObject: merged)
-    }
-
-    /// Atomically rewrite the credentials file, preserving `0600` permissions. A
-    /// partial write here would lock the user out, so we write a temp file and
-    /// rename over the original.
-    static func writeBack(_ data: Data) {
-        let tmp = credentialsURL.appendingPathExtension("tmp")
-        do {
-            try data.write(to: tmp, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600],
-                                                  ofItemAtPath: tmp.path)
-            _ = try FileManager.default.replaceItemAt(credentialsURL, withItemAt: tmp)
-        } catch {
-            try? FileManager.default.removeItem(at: tmp)
-        }
+        let milliseconds = doubleVal(oauth["expiresAt"])
+        return milliseconds > 0
+            ? Date(timeIntervalSince1970: milliseconds / 1000)
+            : nil
     }
 
     /// `{"claudeAiOauth": {"accessToken": …}}`, tolerating a flat shape or a
@@ -253,42 +230,48 @@ public enum ClaudeReader {
     }
 
     /// Best-effort Claude Code version for the User-Agent, pulled from the most
-    /// recent transcript. Falls back to a recent version if none is found.
-    static func claudeCodeVersion() -> String {
-        let projects = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects")
-        let fm = FileManager.default
-        guard let en = fm.enumerator(at: projects,
-                                     includingPropertiesForKeys: [.contentModificationDateKey],
-                                     options: [.skipsHiddenFiles]) else { return "2.1.0" }
+    /// recent transcript belonging to the selected profile.
+    static func claudeCodeVersion(configDirectoryPath: String) -> String {
+        let projects = resolvedConfigDirectory(for: configDirectoryPath)
+            .appendingPathComponent("projects", isDirectory: true)
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: projects,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return "2.1.0" }
         var newest: (URL, Date)?
-        for case let url as URL in en where url.pathExtension == "jsonl" {
-            let mod = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate ?? .distantPast
-            if newest == nil || mod > newest!.1 { newest = (url, mod) }
+            if newest == nil || modified > newest!.1 { newest = (url, modified) }
         }
         guard let file = newest?.0,
               let content = try? String(contentsOf: file, encoding: .utf8) else { return "2.1.0" }
         for line in content.split(separator: "\n").reversed() {
             guard line.contains("\"version\"") else { continue }
             if let data = line.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let v = obj["version"] as? String { return v }
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let version = object["version"] as? String {
+                return version
+            }
         }
         return "2.1.0"
     }
 
     static func makeISO() -> [ISO8601DateFormatter] {
-        let withFrac = ISO8601DateFormatter()
-        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let withFractionalSeconds = ISO8601DateFormatter()
+        withFractionalSeconds.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
-        return [withFrac, plain]
+        return [withFractionalSeconds, plain]
     }
 
-    static func parseDate(_ s: String?, _ formatters: [ISO8601DateFormatter]) -> Date? {
-        guard let s else { return nil }
-        for f in formatters { if let d = f.date(from: s) { return d } }
+    static func parseDate(_ string: String?, _ formatters: [ISO8601DateFormatter]) -> Date? {
+        guard let string else { return nil }
+        for formatter in formatters {
+            if let date = formatter.date(from: string) { return date }
+        }
         return nil
     }
 
@@ -297,56 +280,44 @@ public enum ClaudeReader {
                       sampledAt: Date(), error: message)
     }
 
-    /// Synchronous fetch (blocks the calling thread). Call off the main thread.
-    ///
-    /// `cliRefresh`: when the token has expired and can't be refreshed from the
-    /// file, run `claude -p` to let Claude Code refresh its own (keychain) login.
-    /// Off by default; the app passes the user's setting.
-    public static func fetch(timeout: TimeInterval = 15, cliRefresh: Bool = false) -> ProviderUsage {
-        // No readable credentials at all — a CLI refresh might create them.
-        var loaded = loadCredentials()
-        if loaded == nil, cliRefresh, triggerCLIRefresh() {
-            loaded = loadCredentials()
+    /// Synchronous fetch for one profile. Call from a detached task.
+    public static func fetch(configDirectoryPath: String = defaultConfigDirectoryPath,
+                             timeout: TimeInterval = 15,
+                             cliRefresh: Bool = false) -> ProviderUsage {
+        var loaded = loadCredentials(configDirectoryPath: configDirectoryPath)
+        if loaded == nil,
+           cliRefresh,
+           triggerCLIRefresh(configDirectoryPath: configDirectoryPath) {
+            loaded = loadCredentials(configDirectoryPath: configDirectoryPath,
+                                     forceKeychainRead: true)
         }
-        guard var (data, source) = loaded else {
-            return failure("Claude 인증 정보를 찾지 못함 — 해당 PC에서 `claude` 로그인 필요")
+        guard let (data, _) = loaded else {
+            return failure("Claude 인증 정보 없음 — 설정의 로그인 명령을 실행하세요")
         }
-
-        // Self-refresh only the *file* token, and only when the file is the store
-        // we're actually using. We must never rotate the keychain's token: that
-        // would invalidate Claude Code's own refresh token and force it to
-        // re-login. When the keychain is the fresh source (because the user runs
-        // `claude`), we just read it.
-        if source == "file" {
-            refreshIfNeeded(timeout: timeout)
-            if let reloaded = loadCredentials() { (data, source) = reloaded }
-        }
-
         guard let token = parseToken(from: data) else {
-            return failure("인증 정보를 해석하지 못함 — claude 재로그인 필요")
+            return failure("인증 정보를 해석하지 못함 — 이 Claude 계정을 다시 로그인하세요")
         }
 
-        let usage = requestUsage(token: token, timeout: timeout)
-
-        // A 401/403 despite a "valid-looking" token: recover in order —
-        // 1) file self-refresh, 2) let Claude Code refresh its own login via the
-        // CLI (keychain-safe), then retry once.
-        if case let .authFailed(status) = usage {
-            if source == "file", let refreshed = refreshIfNeeded(force: true, timeout: timeout) {
-                let retry = requestUsage(token: refreshed, timeout: timeout)
-                return retry.toProviderUsage(dataForExpiry: try? Data(contentsOf: credentialsURL),
-                                             lastStatus: status)
+        let result = requestUsage(token: token,
+                                  configDirectoryPath: configDirectoryPath,
+                                  timeout: timeout)
+        if case let .authFailed(status) = result {
+            if cliRefresh,
+               triggerCLIRefresh(configDirectoryPath: configDirectoryPath),
+               let (freshData, _) = loadCredentials(configDirectoryPath: configDirectoryPath,
+                                                     forceKeychainRead: true),
+               let freshToken = parseToken(from: freshData) {
+                return requestUsage(token: freshToken,
+                                    configDirectoryPath: configDirectoryPath,
+                                    timeout: timeout)
+                    .toProviderUsage(dataForExpiry: freshData)
             }
-            if cliRefresh, triggerCLIRefresh(),
-               let (freshData, _) = loadCredentials(), let freshToken = parseToken(from: freshData) {
-                let retry = requestUsage(token: freshToken, timeout: timeout)
-                return retry.toProviderUsage(dataForExpiry: freshData, lastStatus: status)
+            if let expiry = expiresAt(from: data), expiry < Date() {
+                return failure("토큰 만료 — 이 Claude 계정의 자동 갱신 또는 재로그인이 필요합니다")
             }
-            return failure(cliRefresh
-                ? "토큰 갱신 실패 — 해당 PC에서 `claude` 재로그인이 필요할 수 있습니다"
-                : "토큰 만료 — 해당 PC에서 `claude`를 한 번 실행하면 갱신됩니다")
+            return failure("인증 거부됨 (HTTP \(status)) — 이 Claude 계정을 다시 로그인하세요")
         }
-        return usage.toProviderUsage(dataForExpiry: data, lastStatus: nil)
+        return result.toProviderUsage(dataForExpiry: data)
     }
 
     private enum UsageResult {
@@ -356,25 +327,28 @@ public enum ClaudeReader {
         case transport(String)
         case http(Int)
 
-        func toProviderUsage(dataForExpiry: Data?, lastStatus: Int?) -> ProviderUsage {
+        func toProviderUsage(dataForExpiry: Data?) -> ProviderUsage {
             switch self {
-            case let .ok(obj): return parse(obj)
+            case let .ok(object): return parse(object)
             case let .authFailed(status):
-                if let d = dataForExpiry, let expiry = expiresAt(from: d), expiry < Date() {
-                    return failure("토큰 만료 — 자동 갱신 실패. 해당 PC에서 `claude` 재로그인 필요")
+                if let dataForExpiry,
+                   let expiry = expiresAt(from: dataForExpiry), expiry < Date() {
+                    return failure("토큰 만료 — 자동 갱신 실패. 이 Claude 계정을 다시 로그인하세요")
                 }
-                return failure("인증 거부됨 (HTTP \(status)) — claude 재로그인 필요")
+                return failure("인증 거부됨 (HTTP \(status)) — 이 Claude 계정을 다시 로그인하세요")
             case .rateLimited: return failure("rate limited (429) — polling too fast")
-            case let .transport(msg): return failure(msg)
+            case let .transport(message): return failure(message)
             case let .http(status): return failure("HTTP \(status)")
             }
         }
     }
 
-    private static func requestUsage(token: String, timeout: TimeInterval) -> UsageResult {
+    private static func requestUsage(token: String,
+                                     configDirectoryPath: String,
+                                     timeout: TimeInterval) -> UsageResult {
         let response = HTTP.get(usageURL, headers: [
             "Authorization": "Bearer \(token)",
-            "User-Agent": "claude-code/\(claudeCodeVersion())",
+            "User-Agent": "claude-code/\(claudeCodeVersion(configDirectoryPath: configDirectoryPath))",
             "Content-Type": "application/json",
         ], timeout: timeout)
 
@@ -382,21 +356,24 @@ public enum ClaudeReader {
         switch response.status {
         case 200:
             guard let data = response.data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return .http(200) }
-            return .ok(obj)
+            return .ok(object)
         case 401, 403: return .authFailed(response.status)
         case 429: return .rateLimited
         default: return .http(response.status)
         }
     }
 
-    static func parse(_ obj: [String: Any]) -> ProviderUsage {
+    static func parse(_ object: [String: Any]) -> ProviderUsage {
         let formatters = makeISO()
-        func window(_ key: String, _ w: UsageWindow) -> RateWindow? {
-            guard let d = obj[key] as? [String: Any],
-                  let reset = parseDate(d["resets_at"] as? String, formatters) else { return nil }
-            return RateWindow(window: w, usedPercent: doubleVal(d["utilization"]), resetsAt: reset)
+        func window(_ key: String, _ usageWindow: UsageWindow) -> RateWindow? {
+            guard let dictionary = object[key] as? [String: Any],
+                  let reset = parseDate(dictionary["resets_at"] as? String, formatters)
+            else { return nil }
+            return RateWindow(window: usageWindow,
+                              usedPercent: doubleVal(dictionary["utilization"]),
+                              resetsAt: reset)
         }
         return ProviderUsage(
             provider: .claude,
