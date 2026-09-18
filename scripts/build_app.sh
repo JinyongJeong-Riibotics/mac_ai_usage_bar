@@ -10,7 +10,7 @@ APP_NAME="MacAIUsageBar"
 DISPLAY_NAME="AI Usage Bar"
 BUNDLE_ID="io.riibotics.MacAIUsageBar"
 # Release workflow passes the tag via APP_VERSION; default for local builds.
-VERSION="${APP_VERSION:-1.7.0}"
+VERSION="${APP_VERSION:-1.7.1}"
 CONFIG="release"
 
 echo "▶︎ swift build ($CONFIG)…"

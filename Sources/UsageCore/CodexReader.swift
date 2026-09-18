@@ -146,17 +146,15 @@ public enum CodexReader {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = ["app-server", "-c", "cli_auth_credentials_store=\"file\""]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = minimalProcessEnvironment()
         environment["CODEX_HOME"] = codexHome.path
         environment["CODEX_SQLITE_HOME"] = codexHome.path
         environment["PATH"] = augmentedPath(
             executablePath: executable,
             inheritedPath: environment["PATH"]
         )
-        environment.removeValue(forKey: "CODEX_ACCESS_TOKEN")
-        environment.removeValue(forKey: "CODEX_API_KEY")
-        environment.removeValue(forKey: "OPENAI_API_KEY")
         process.environment = environment
+        process.currentDirectoryURL = safeProcessWorkingDirectory()
 
         let input = Pipe()
         let output = Pipe()

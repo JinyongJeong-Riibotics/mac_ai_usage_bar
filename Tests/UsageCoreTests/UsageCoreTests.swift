@@ -17,6 +17,34 @@ final class FormattingTests: XCTestCase {
     }
 }
 
+final class ProcessIsolationTests: XCTestCase {
+    func testMinimalEnvironmentKeepsRuntimeValuesAndDropsAmbientContext() {
+        let environment = minimalProcessEnvironment(inherited: [
+            "HOME": "/Users/test",
+            "PATH": "/usr/bin:/bin",
+            "HTTPS_PROXY": "http://proxy.example",
+            "PWD": "/Users/test/Music",
+            "OLDPWD": "/Users/test/Documents",
+            "OPENAI_API_KEY": "secret",
+            "CLAUDE_PLUGIN_ROOT": "/Users/test/plugin",
+        ])
+
+        XCTAssertEqual(environment["HOME"], "/Users/test")
+        XCTAssertEqual(environment["PATH"], "/usr/bin:/bin")
+        XCTAssertEqual(environment["HTTPS_PROXY"], "http://proxy.example")
+        XCTAssertNil(environment["PWD"])
+        XCTAssertNil(environment["OLDPWD"])
+        XCTAssertNil(environment["OPENAI_API_KEY"])
+        XCTAssertNil(environment["CLAUDE_PLUGIN_ROOT"])
+    }
+
+    func testCommandsDefaultToNeutralTemporaryDirectory() throws {
+        let output = try XCTUnwrap(runCommand("/bin/pwd", []))
+        let actual = URL(fileURLWithPath: output).resolvingSymlinksInPath().path
+        XCTAssertEqual(actual, safeProcessWorkingDirectory().path)
+    }
+}
+
 final class CodexParseTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_785_000_000)
 
@@ -120,6 +148,8 @@ final class ClaudeProfileTests: XCTestCase {
                 "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/shared",
                 "CLAUDE_CODE_OAUTH_TOKEN": "wrong-token",
                 "ANTHROPIC_API_KEY": "wrong-key",
+                "PWD": "/Users/test/Music",
+                "CLAUDE_PLUGIN_ROOT": "/Users/test/plugin",
             ]
         )
         XCTAssertEqual(custom["CLAUDE_CONFIG_DIR"], "/tmp/claude-profile")
@@ -127,12 +157,42 @@ final class ClaudeProfileTests: XCTestCase {
         XCTAssertNil(custom["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
         XCTAssertNil(custom["CLAUDE_CODE_OAUTH_TOKEN"])
         XCTAssertNil(custom["ANTHROPIC_API_KEY"])
+        XCTAssertNil(custom["PWD"])
+        XCTAssertNil(custom["CLAUDE_PLUGIN_ROOT"])
+        XCTAssertEqual(custom["CLAUDE_CODE_SKIP_PROMPT_HISTORY"], "1")
 
         let defaultProfile = ClaudeReader.claudeEnvironment(
             configDirectoryPath: "~/.claude",
             inherited: ["CLAUDE_CONFIG_DIR": "/wrong"]
         )
         XCTAssertNil(defaultProfile["CLAUDE_CONFIG_DIR"])
+    }
+
+    func testCLIRefreshRunsWithoutLocalCapabilitiesOrPersistence() {
+        let arguments = ClaudeReader.cliRefreshArguments()
+        XCTAssertTrue(arguments.contains("--safe-mode"))
+        XCTAssertTrue(arguments.contains("--restricted"))
+        XCTAssertTrue(arguments.contains("--strict-mcp-config"))
+        XCTAssertTrue(arguments.contains("--no-chrome"))
+        XCTAssertTrue(arguments.contains("--no-session-persistence"))
+        XCTAssertEqual(Array(arguments.suffix(2)), ["-p", "ok"])
+
+        let toolsIndex = arguments.firstIndex(of: "--tools")
+        XCTAssertNotNil(toolsIndex)
+        if let toolsIndex {
+            XCTAssertEqual(arguments[toolsIndex + 1], "")
+        }
+        let promptsIndex = arguments.firstIndex(of: "--permission-prompts")
+        XCTAssertNotNil(promptsIndex)
+        if let promptsIndex {
+            XCTAssertEqual(arguments[promptsIndex + 1], "none")
+        }
+    }
+
+    func testParsesClaudeVersionWithoutReadingProjectTranscripts() {
+        XCTAssertEqual(ClaudeReader.parseClaudeVersion("2.1.276 (Claude Code)"), "2.1.276")
+        XCTAssertNil(ClaudeReader.parseClaudeVersion("Claude Code"))
+        XCTAssertNil(ClaudeReader.parseClaudeVersion("2.1"))
     }
 }
 

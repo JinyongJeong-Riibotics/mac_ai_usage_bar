@@ -126,6 +126,8 @@ public enum ClaudeReader {
 
     private static let cliRefreshLock = NSLock()
     nonisolated(unsafe) static var lastCLIRefreshByProfile: [String: Date] = [:]
+    private static let versionLock = NSLock()
+    nonisolated(unsafe) static var cachedClaudeCodeVersion: String?
 
     public static func diagnosticClaudeBinary() -> String {
         locateClaudeBinary() ?? "claude 실행파일 못 찾음 (터미널 없이 갱신 불가)"
@@ -142,11 +144,6 @@ public enum ClaudeReader {
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return path
         }
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        if let found = runCommand(shell, ["-lc", "command -v claude"]),
-           FileManager.default.isExecutableFile(atPath: found) {
-            return found
-        }
         return nil
     }
 
@@ -158,18 +155,9 @@ public enum ClaudeReader {
         configDirectoryPath: String,
         inherited: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
-        var environment = inherited
-        for key in [
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_AUTH_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_USE_FOUNDRY",
-        ] {
-            environment.removeValue(forKey: key)
-        }
+        var environment = minimalProcessEnvironment(inherited: inherited)
+        environment["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] = "1"
+        environment["NO_COLOR"] = "1"
         if isDefaultConfigDirectory(configDirectoryPath) {
             environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
         } else {
@@ -178,6 +166,25 @@ public enum ClaudeReader {
             ).path
         }
         return environment
+    }
+
+    /// A token refresh needs one model response and no local capabilities.
+    /// Safe/restricted mode prevents user/project settings, hooks, plugins,
+    /// skills and MCP servers from loading; the remaining flags disable tools,
+    /// Chrome integration, persistence, and unattended permission prompts.
+    static func cliRefreshArguments() -> [String] {
+        [
+            "--safe-mode",
+            "--restricted",
+            "--tools", "",
+            "--disallowedTools", "mcp__*",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+            "--no-chrome",
+            "--no-session-persistence",
+            "--permission-prompts", "none",
+            "-p", "ok",
+        ]
     }
 
     /// Ask Claude Code to refresh exactly one profile. Each profile has its own
@@ -196,7 +203,7 @@ public enum ClaudeReader {
         lastCLIRefreshByProfile[profileKey] = now
         cliRefreshLock.unlock()
 
-        return runCommand(claude, ["-p", "ok"], timeout: timeout,
+        return runCommand(claude, cliRefreshArguments(), timeout: timeout,
                           environment: claudeEnvironment(
                             configDirectoryPath: configDirectoryPath
                           )) != nil
@@ -229,34 +236,28 @@ public enum ClaudeReader {
         return raw.isEmpty ? nil : raw
     }
 
-    /// Best-effort Claude Code version for the User-Agent, pulled from the most
-    /// recent transcript belonging to the selected profile.
-    static func claudeCodeVersion(configDirectoryPath: String) -> String {
-        let projects = resolvedConfigDirectory(for: configDirectoryPath)
-            .appendingPathComponent("projects", isDirectory: true)
-        let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(
-            at: projects,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return "2.1.0" }
-        var newest: (URL, Date)?
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            if newest == nil || modified > newest!.1 { newest = (url, modified) }
+    /// Best-effort version for the usage User-Agent. Query the executable once
+    /// instead of recursively scanning every profile's project transcripts.
+    static func claudeCodeVersion() -> String {
+        versionLock.lock()
+        defer { versionLock.unlock() }
+        if let cachedClaudeCodeVersion { return cachedClaudeCodeVersion }
+
+        let detected = locateClaudeBinary()
+            .flatMap { runCommand($0, ["--version"], timeout: 5) }
+            .flatMap(parseClaudeVersion)
+            ?? "2.1.0"
+        cachedClaudeCodeVersion = detected
+        return detected
+    }
+
+    static func parseClaudeVersion(_ output: String) -> String? {
+        guard let candidate = output.split(whereSeparator: { $0.isWhitespace }).first else {
+            return nil
         }
-        guard let file = newest?.0,
-              let content = try? String(contentsOf: file, encoding: .utf8) else { return "2.1.0" }
-        for line in content.split(separator: "\n").reversed() {
-            guard line.contains("\"version\"") else { continue }
-            if let data = line.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let version = object["version"] as? String {
-                return version
-            }
-        }
-        return "2.1.0"
+        let parts = candidate.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 3, parts.allSatisfy({ Int($0) != nil }) else { return nil }
+        return String(candidate)
     }
 
     static func makeISO() -> [ISO8601DateFormatter] {
@@ -298,18 +299,14 @@ public enum ClaudeReader {
             return failure("인증 정보를 해석하지 못함 — 이 Claude 계정을 다시 로그인하세요")
         }
 
-        let result = requestUsage(token: token,
-                                  configDirectoryPath: configDirectoryPath,
-                                  timeout: timeout)
+        let result = requestUsage(token: token, timeout: timeout)
         if case let .authFailed(status) = result {
             if cliRefresh,
                triggerCLIRefresh(configDirectoryPath: configDirectoryPath),
                let (freshData, _) = loadCredentials(configDirectoryPath: configDirectoryPath,
                                                      forceKeychainRead: true),
                let freshToken = parseToken(from: freshData) {
-                return requestUsage(token: freshToken,
-                                    configDirectoryPath: configDirectoryPath,
-                                    timeout: timeout)
+                return requestUsage(token: freshToken, timeout: timeout)
                     .toProviderUsage(dataForExpiry: freshData)
             }
             if let expiry = expiresAt(from: data), expiry < Date() {
@@ -344,11 +341,10 @@ public enum ClaudeReader {
     }
 
     private static func requestUsage(token: String,
-                                     configDirectoryPath: String,
                                      timeout: TimeInterval) -> UsageResult {
         let response = HTTP.get(usageURL, headers: [
             "Authorization": "Bearer \(token)",
-            "User-Agent": "claude-code/\(claudeCodeVersion(configDirectoryPath: configDirectoryPath))",
+            "User-Agent": "claude-code/\(claudeCodeVersion())",
             "Content-Type": "application/json",
         ], timeout: timeout)
 
