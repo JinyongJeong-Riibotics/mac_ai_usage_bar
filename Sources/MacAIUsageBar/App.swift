@@ -29,5 +29,13 @@ struct MacAIUsageBarApp: App {
         Settings {
             SettingsView(settings: settings)
         }
+
+        WindowGroup("사용량 그래프", for: UsageGraphSelection.self) { $selection in
+            if let selection {
+                UsageGraphView(selection: selection, store: store)
+            }
+        }
+        .defaultSize(width: 720, height: 460)
+        .windowResizability(.contentMinSize)
     }
 }

@@ -11,8 +11,13 @@ macOS 메뉴바에서 **여러 Codex 계정과 여러 Claude 계정**의 사용�
 | Claude | ✅ | ✅ | ✅ | ✅ | — |
 
 메뉴바에는 계정/서비스 이름과 선택한 창의 %를 `Codex 92% · Claude 9% · Claude 2 31%` 형태로 보여주고,
-클릭하면 두 서비스의 5h/주간 상세와 리셋 시간이 펼쳐진다. Codex 리셋 티켓 잔여 수는
+클릭하면 두 서비스의 5h/주간 상세와 리셋 시간이 펼쳐진다. 각 계정의 **Graph**를 누르면
+최근 7일의 5시간/주간 사용률을 날짜·시간 축으로 볼 수 있다. Codex 리셋 티켓 잔여 수는
 상세 화면에만 표시하며 메뉴바 문자열에는 추가하지 않는다.
+
+정상 조회 결과는 계정별로 `~/Library/Application Support/io.riibotics.MacAIUsageBar/usage-history.json`에
+저장한다. 파일에는 시각과 사용률만 기록하며 계정 경로·토큰·자격증명은 포함하지 않는다.
+7일이 지난 기록은 다음 주기 조회 또는 그래프 열기 때 자동으로 삭제된다.
 
 ## 설정 (Cmd+, 또는 드롭다운 ⚙︎)
 
@@ -102,6 +107,7 @@ Combine 구독을 통해 타이머가 즉시 재스케줄된다.
 Sources/
   UsageCore/          공유 로직 (플랫폼 비의존, GUI 없음)
     Models.swift        RateWindow / ProviderUsage 등 값 타입
+    UsageHistory.swift  계정별 7일 사용률 기록·정리·영속화
     CodexReader.swift   계정별 CODEX_HOME + App Server 한도 조회
     ClaudeReader.swift  oauth/usage 라이브 조회
     Formatting.swift    % / 리셋 시간 포매팅
@@ -113,6 +119,7 @@ Sources/
     Severity.swift      사용률→심각도(정상/주의/경고) 및 색상 매핑
     BarLabelView.swift  메뉴바 라벨 (이름·색상·경고 아이콘)
     MenuContentView.swift  드롭다운 UI
+    UsageGraphView.swift   계정별 최근 7일 사용률 그래프
     SettingsView.swift  설정 창
   usage-probe/        터미널에서 값 검증용 CLI
 ```
