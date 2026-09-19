@@ -8,6 +8,7 @@ let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? S
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var settings: AppSettings
+    @Environment(\.openWindow) private var openWindow
 
     private var codexAccounts: [CodexAccount] {
         settings.showCodex ? settings.enabledCodexAccounts : []
@@ -26,7 +27,15 @@ struct MenuContentView: View {
                                 systemImage: "chevron.left.forwardslash.chevron.right",
                                 usage: store.codexByAccount[account.id],
                                 settings: settings,
-                                notice: store.codexNotices[account.id])
+                                notice: store.codexNotices[account.id],
+                                showGraph: {
+                                    openWindow(value: UsageGraphSelection(
+                                        provider: .codex,
+                                        accountID: account.id,
+                                        accountName: account.displayName
+                                    ))
+                                    NSApplication.shared.activate(ignoringOtherApps: true)
+                                })
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 if account.id != codexAccounts.last?.id {
@@ -39,7 +48,15 @@ struct MenuContentView: View {
             ForEach(claudeAccounts) { account in
                 ProviderSection(title: account.displayName, systemImage: "sparkle",
                                 usage: store.claudeByAccount[account.id], settings: settings,
-                                notice: store.claudeNotices[account.id])
+                                notice: store.claudeNotices[account.id],
+                                showGraph: {
+                                    openWindow(value: UsageGraphSelection(
+                                        provider: .claude,
+                                        accountID: account.id,
+                                        accountName: account.displayName
+                                    ))
+                                    NSApplication.shared.activate(ignoringOtherApps: true)
+                                })
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 if account.id != claudeAccounts.last?.id {
@@ -112,6 +129,7 @@ private struct ProviderSection: View {
     let usage: ProviderUsage?
     @ObservedObject var settings: AppSettings
     var notice: String? = nil
+    let showGraph: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -120,6 +138,13 @@ private struct ProviderSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(title).font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(action: showGraph) {
+                    Label("Graph", systemImage: "chart.xyaxis.line")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("최근 7일 사용률 그래프")
             }
 
             if let usage, usage.fiveHour == nil && usage.weekly == nil {

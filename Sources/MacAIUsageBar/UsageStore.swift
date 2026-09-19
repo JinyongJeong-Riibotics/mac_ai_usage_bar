@@ -15,9 +15,12 @@ final class UsageStore: ObservableObject {
     @Published var claudeByAccount: [UUID: ProviderUsage] = [:]
     @Published var claudeNotices: [UUID: String] = [:]
     @Published var lastRefresh: Date?
+    @Published private(set) var historyRevision = 0
+    @Published private(set) var historyError: String?
 
     private let settings = AppSettings.shared
     private let notifier = UsageNotifier()
+    private let historyStorage = UsageHistoryStorage()
     private var codexTimer: Timer?
     private var claudeTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
@@ -167,6 +170,7 @@ final class UsageStore: ObservableObject {
                     if usage.fiveHour != nil || usage.weekly != nil {
                         self.codexByAccount[result.accountID] = usage
                         self.codexNotices[result.accountID] = nil
+                        self.recordHistory(usage, accountID: result.accountID)
                         self.notifier.evaluate(
                             usage,
                             settings: self.settings,
@@ -237,6 +241,7 @@ final class UsageStore: ObservableObject {
                     if usage.fiveHour != nil || usage.weekly != nil {
                         self.claudeByAccount[result.accountID] = usage
                         self.claudeNotices[result.accountID] = nil
+                        self.recordHistory(usage, accountID: result.accountID)
                         self.notifier.evaluate(
                             usage,
                             settings: self.settings,
@@ -287,6 +292,24 @@ final class UsageStore: ObservableObject {
     }
 
     var isClaudeBackingOff: Bool { claudeBackoff > 1 }
+
+    func historySamples(provider: Provider, accountID: UUID) -> [UsageHistorySample] {
+        // Reading this published value makes chart windows redraw after a new
+        // periodic sample is written.
+        _ = historyRevision
+        return historyStorage.samples(provider: provider, accountID: accountID)
+    }
+
+    private func recordHistory(_ usage: ProviderUsage, accountID: UUID) {
+        do {
+            if try historyStorage.record(usage, accountID: accountID) {
+                historyRevision &+= 1
+            }
+            historyError = nil
+        } catch {
+            historyError = "사용 기록 저장 실패: \(error.localizedDescription)"
+        }
+    }
 }
 
 private struct CodexFetchResult: Sendable {

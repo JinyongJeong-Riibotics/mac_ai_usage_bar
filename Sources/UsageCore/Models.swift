@@ -26,7 +26,7 @@ public struct RateWindow: Sendable, Hashable {
     public var timeUntilReset: TimeInterval { resetsAt.timeIntervalSinceNow }
 }
 
-public enum Provider: String, Sendable {
+public enum Provider: String, Sendable, Codable, Hashable {
     case codex = "Codex"
     case claude = "Claude"
 }

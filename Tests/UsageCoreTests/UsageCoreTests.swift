@@ -17,6 +17,104 @@ final class FormattingTests: XCTestCase {
     }
 }
 
+final class UsageHistoryTests: XCTestCase {
+    private let accountID = UUID(uuidString: "A7EF2D6B-14AA-4515-9729-1F4AF73696E3")!
+
+    func testPersistsSuccessfulSamplesByProviderAndAccount() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("history.json")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let storage = UsageHistoryStorage(fileURL: file, now: now)
+
+        XCTAssertTrue(try storage.record(
+            usage(provider: .codex, at: now, fiveHour: 34.5, weekly: 78),
+            accountID: accountID,
+            now: now
+        ))
+
+        let reloaded = UsageHistoryStorage(fileURL: file, now: now)
+        let samples = reloaded.samples(provider: .codex, accountID: accountID, now: now)
+        XCTAssertEqual(samples.count, 1)
+        XCTAssertEqual(samples.first?.sampledAt, now)
+        XCTAssertEqual(samples.first?.fiveHourUsedPercent, 34.5)
+        XCTAssertEqual(samples.first?.weeklyUsedPercent, 78)
+        XCTAssertTrue(reloaded.samples(provider: .claude,
+                                       accountID: accountID,
+                                       now: now).isEmpty)
+    }
+
+    func testPrunesSamplesOlderThanSevenDaysAndKeepsBoundary() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("history.json")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let retention = UsageHistoryStorage.defaultRetention
+        let old = now.addingTimeInterval(-retention - 1)
+        let boundary = now.addingTimeInterval(-retention)
+        let storage = UsageHistoryStorage(fileURL: file, now: old)
+
+        try storage.record(usage(provider: .codex, at: old, weekly: 10),
+                           accountID: accountID, now: old)
+        try storage.record(usage(provider: .codex, at: boundary, weekly: 20),
+                           accountID: accountID, now: boundary)
+
+        let reloaded = UsageHistoryStorage(fileURL: file, now: now)
+        let samples = reloaded.samples(provider: .codex, accountID: accountID, now: now)
+        XCTAssertEqual(samples.map(\.sampledAt), [boundary])
+        XCTAssertEqual(samples.first?.weeklyUsedPercent, 20)
+    }
+
+    func testIgnoresFailuresAndCoalescesRapidRefreshes() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("history.json")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let storage = UsageHistoryStorage(fileURL: file, now: now)
+        let failure = ProviderUsage(provider: .claude, fiveHour: nil, weekly: nil,
+                                    sampledAt: now, error: "rate limited")
+
+        XCTAssertFalse(try storage.record(failure, accountID: accountID, now: now))
+        try storage.record(usage(provider: .claude, at: now, fiveHour: 101),
+                           accountID: accountID, now: now)
+        try storage.record(usage(provider: .claude,
+                                 at: now.addingTimeInterval(20),
+                                 fiveHour: 42),
+                           accountID: accountID,
+                           now: now.addingTimeInterval(20))
+
+        let samples = storage.samples(provider: .claude,
+                                      accountID: accountID,
+                                      now: now.addingTimeInterval(20))
+        XCTAssertEqual(samples.count, 1)
+        XCTAssertEqual(samples.first?.fiveHourUsedPercent, 42)
+    }
+
+    private func temporaryDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("UsageHistoryTests-\(UUID().uuidString)",
+                                    isDirectory: true)
+    }
+
+    private func usage(provider: Provider,
+                       at date: Date,
+                       fiveHour: Double? = nil,
+                       weekly: Double? = nil) -> ProviderUsage {
+        ProviderUsage(
+            provider: provider,
+            fiveHour: fiveHour.map {
+                RateWindow(window: .fiveHour, usedPercent: $0,
+                           resetsAt: date.addingTimeInterval(5 * 60 * 60))
+            },
+            weekly: weekly.map {
+                RateWindow(window: .weekly, usedPercent: $0,
+                           resetsAt: date.addingTimeInterval(7 * 24 * 60 * 60))
+            },
+            sampledAt: date
+        )
+    }
+}
+
 final class ProcessIsolationTests: XCTestCase {
     func testMinimalEnvironmentKeepsRuntimeValuesAndDropsAmbientContext() {
         let environment = minimalProcessEnvironment(inherited: [
