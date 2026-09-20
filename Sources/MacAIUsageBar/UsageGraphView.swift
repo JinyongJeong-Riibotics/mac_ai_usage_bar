@@ -138,7 +138,9 @@ struct UsageGraphView: View {
             if let selectedSample {
                 RuleMark(x: .value("선택한 시각", selectedSample.sampledAt))
                     .foregroundStyle(.secondary.opacity(0.6))
-                    .annotation(position: .top, spacing: 6) {
+                    .annotation(position: .top,
+                                alignment: annotationAlignment(for: selectedSample.sampledAt),
+                                spacing: 6) {
                         selectionAnnotation(selectedSample)
                     }
             }
@@ -148,7 +150,10 @@ struct UsageGraphView: View {
             range: [Color.blue, Color.purple]
         )
         .chartLegend(position: .top, alignment: .leading, spacing: 16)
-        .chartXScale(domain: chartRange)
+        .chartXScale(
+            domain: chartRange,
+            range: .plotDimension(startPadding: 8, endPadding: 96)
+        )
         .chartYScale(domain: 0 ... 100)
         .chartYAxis {
             AxisMarks(position: .leading, values: [0, 25, 50, 75, 100]) { value in
@@ -175,6 +180,16 @@ struct UsageGraphView: View {
         .chartXSelection(value: $selectedDate)
         .frame(minHeight: 280)
         .accessibilityLabel("\(selection.accountName) 최근 7일 사용률 그래프")
+    }
+
+    /// Keep the selected-value card inside the chart on both edges. The right
+    /// side also has extra plot padding because the newest sample normally sits
+    /// at the very end of the seven-day domain.
+    private func annotationAlignment(for date: Date) -> Alignment {
+        let midpoint = chartRange.lowerBound.addingTimeInterval(
+            UsageHistoryStorage.defaultRetention / 2
+        )
+        return date >= midpoint ? .trailing : .leading
     }
 
     private func selectionAnnotation(_ sample: UsageHistorySample) -> some View {
