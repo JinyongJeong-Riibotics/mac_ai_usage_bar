@@ -1,7 +1,7 @@
 /// Separates click decisions from the system double-click timer and UI effects.
 struct MenuBarClickState {
     enum Action: Equatable {
-        case waitForSingleClick, toggleDetails, collapse, expandAndShowDetails, none
+        case waitForSingleClick, toggleDetails, collapse, expand, none
     }
 
     private var waitingForSingleClick = false
@@ -10,16 +10,16 @@ struct MenuBarClickState {
         // Accessibility/keyboard activation does not need double-click detection.
         if count == 0 {
             waitingForSingleClick = false
-            return isCollapsed ? .expandAndShowDetails : .toggleDetails
+            return .toggleDetails
         }
         if count == 1 {
-            waitingForSingleClick = !isCollapsed
-            return isCollapsed ? .expandAndShowDetails : .waitForSingleClick
+            waitingForSingleClick = true
+            return .waitForSingleClick
         }
         // Ignore extra clicks after expanding or collapsing, including triples.
-        guard count == 2, waitingForSingleClick, !isCollapsed else { return .none }
+        guard count == 2, waitingForSingleClick else { return .none }
         waitingForSingleClick = false
-        return .collapse
+        return isCollapsed ? .expand : .collapse
     }
 
     mutating func singleClickExpired() -> Action {
