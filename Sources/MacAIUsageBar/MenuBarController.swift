@@ -42,13 +42,15 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
         if wasCollapsed != settings.isMenuBarCollapsed {
             singleClickTask?.cancel()
             clickState.cancel()
-            if settings.isMenuBarCollapsed { popover.close() }
+            // A width change is separate from opening details. Close any old
+            // popover so it cannot keep an anchor from the previous title.
+            popover.close()
             wasCollapsed = settings.isMenuBarCollapsed
         }
         guard let button = statusItem.button else { return }
         button.attributedTitle = BarLabel(store: store, settings: settings).attributedTitle
         button.toolTip = settings.isMenuBarCollapsed
-            ? "AI Usage 접힘 · 클릭하여 펼치고 상세 정보 보기"
+            ? "AI Usage 접힘 · 클릭하여 상세 정보 보기 · 더블 클릭하여 메뉴바 펼치기"
             : "클릭하여 상세 정보 보기 · 더블 클릭하여 메뉴바 접기"
         button.setAccessibilityLabel(settings.isMenuBarCollapsed
             ? "AI Usage, 접힘" : button.attributedTitle.string)
@@ -83,11 +85,11 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
             popover.close()
             settings.isMenuBarCollapsed = true
             updateLabel()
-        case .expandAndShowDetails:
+        case .expand:
             singleClickTask?.cancel()
+            popover.close()
             settings.isMenuBarCollapsed = false
             updateLabel()
-            showDetails()
         case .toggleDetails:
             if popover.isShown { popover.close() } else { showDetails() }
         case .none:
@@ -108,10 +110,12 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
             ScrollView { content }.frame(width: 300, height: height)
         )
         popover.contentSize = NSSize(width: 300, height: height)
-        // Reposition after changing from the short title to the expanded title.
+        // A single click never changes the title or its width. Anchor directly
+        // below the current button, including the compact AI › label.
         button.window?.layoutIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.show(relativeTo: button.bounds, of: button,
+                     preferredEdge: button.isFlipped ? .maxY : .minY)
         popover.contentViewController?.view.window?.makeKey()
         button.highlight(true)
         store.start()

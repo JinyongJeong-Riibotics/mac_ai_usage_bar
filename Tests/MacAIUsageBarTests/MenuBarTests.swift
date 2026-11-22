@@ -18,12 +18,18 @@ final class MenuBarClickTests: XCTestCase {
         XCTAssertEqual(state.singleClickExpired(), .none)
     }
 
-    func testCollapsedSingleClickExpandsImmediatelyAndShowsDetails() {
+    func testCollapsedSingleClickOnlyTogglesDetails() {
         var state = MenuBarClickState()
-        XCTAssertEqual(state.click(count: 1, isCollapsed: true), .expandAndShowDetails)
+        XCTAssertEqual(state.click(count: 1, isCollapsed: true), .waitForSingleClick)
+        XCTAssertEqual(state.singleClickExpired(), .toggleDetails)
         XCTAssertEqual(state.singleClickExpired(), .none)
-        // A quick extra click must not undo the expansion.
-        XCTAssertEqual(state.click(count: 2, isCollapsed: false), .none)
+    }
+
+    func testCollapsedDoubleClickExpandsWithoutOpeningDetails() {
+        var state = MenuBarClickState()
+        XCTAssertEqual(state.click(count: 1, isCollapsed: true), .waitForSingleClick)
+        XCTAssertEqual(state.click(count: 2, isCollapsed: true), .expand)
+        XCTAssertEqual(state.singleClickExpired(), .none)
     }
 
     func testTripleClickDoesNotUndoCollapse() {
@@ -35,11 +41,21 @@ final class MenuBarClickTests: XCTestCase {
     }
 
     func testSeparateSingleClicksBothToggleDetails() {
-        var state = MenuBarClickState()
-        for _ in 0..<2 {
-            XCTAssertEqual(state.click(count: 1, isCollapsed: false), .waitForSingleClick)
-            XCTAssertEqual(state.singleClickExpired(), .toggleDetails)
+        for isCollapsed in [true, false] {
+            var state = MenuBarClickState()
+            for _ in 0..<2 {
+                XCTAssertEqual(state.click(count: 1, isCollapsed: isCollapsed), .waitForSingleClick)
+                XCTAssertEqual(state.singleClickExpired(), .toggleDetails)
+            }
         }
+    }
+
+    func testTripleClickDoesNotUndoExpansion() {
+        var state = MenuBarClickState()
+        _ = state.click(count: 1, isCollapsed: true)
+        _ = state.click(count: 2, isCollapsed: true)
+        XCTAssertEqual(state.click(count: 3, isCollapsed: false), .none)
+        XCTAssertEqual(state.singleClickExpired(), .none)
     }
 
     func testSettingsChangeCancelsPendingClick() {
@@ -51,7 +67,7 @@ final class MenuBarClickTests: XCTestCase {
 
     func testAccessibilityActivationIsImmediate() {
         var state = MenuBarClickState()
-        XCTAssertEqual(state.click(count: 0, isCollapsed: true), .expandAndShowDetails)
+        XCTAssertEqual(state.click(count: 0, isCollapsed: true), .toggleDetails)
         XCTAssertEqual(state.click(count: 0, isCollapsed: false), .toggleDetails)
         XCTAssertEqual(state.singleClickExpired(), .none)
     }
