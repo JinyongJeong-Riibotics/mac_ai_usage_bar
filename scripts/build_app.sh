@@ -9,8 +9,8 @@ cd "$(dirname "$0")/.."
 APP_NAME="MacAIUsageBar"
 DISPLAY_NAME="AI Usage Bar"
 BUNDLE_ID="io.riibotics.MacAIUsageBar"
-# Release workflow passes the tag via APP_VERSION; default for local builds.
-VERSION="${APP_VERSION:-1.8.1}"
+# CI passes the resolved release version; local builds use the planned version.
+VERSION="${APP_VERSION:-$(cat VERSION)}"
 CONFIG="release"
 
 echo "▶︎ swift build ($CONFIG)…"

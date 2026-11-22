@@ -5,3 +5,5 @@
 *.xcodeproj/project.xcworkspace/xcuserdata/
 DerivedData/
 dist/
+__pycache__/
+*.pyc

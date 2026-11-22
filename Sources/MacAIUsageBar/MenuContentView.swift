@@ -8,7 +8,8 @@ let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? S
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var settings: AppSettings
-    @Environment(\.openWindow) private var openWindow
+    let showSettings: () -> Void
+    let showGraph: (UsageGraphSelection) -> Void
 
     private var codexAccounts: [CodexAccount] {
         settings.showCodex ? settings.enabledCodexAccounts : []
@@ -29,12 +30,11 @@ struct MenuContentView: View {
                                 settings: settings,
                                 notice: store.codexNotices[account.id],
                                 showGraph: {
-                                    openWindow(value: UsageGraphSelection(
+                                    showGraph(UsageGraphSelection(
                                         provider: .codex,
                                         accountID: account.id,
                                         accountName: account.displayName
                                     ))
-                                    NSApplication.shared.activate(ignoringOtherApps: true)
                                 })
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -50,12 +50,11 @@ struct MenuContentView: View {
                                 usage: store.claudeByAccount[account.id], settings: settings,
                                 notice: store.claudeNotices[account.id],
                                 showGraph: {
-                                    openWindow(value: UsageGraphSelection(
+                                    showGraph(UsageGraphSelection(
                                         provider: .claude,
                                         accountID: account.id,
                                         accountName: account.displayName
                                     ))
-                                    NSApplication.shared.activate(ignoringOtherApps: true)
                                 })
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -106,10 +105,11 @@ struct MenuContentView: View {
             .buttonStyle(.borderless)
             .help("지금 새로고침")
 
-            SettingsLink {
+            Button(action: showSettings) {
                 Image(systemName: "gearshape")
             }
             .buttonStyle(.borderless)
+            .keyboardShortcut(",", modifiers: .command)
             .help("설정")
 
             Button { NSApplication.shared.terminate(nil) } label: {

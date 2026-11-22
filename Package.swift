@@ -18,5 +18,9 @@ let package = Package(
             name: "UsageCoreTests",
             dependencies: ["UsageCore"]
         ),
+        .testTarget(
+            name: "MacAIUsageBarTests",
+            dependencies: ["MacAIUsageBar", "UsageCore"]
+        ),
     ]
 )
