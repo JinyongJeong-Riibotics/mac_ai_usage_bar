@@ -39,7 +39,7 @@ final class UsageStore: ObservableObject {
     private var claudeBackoff: Double = 1
     private let maxBackoff: Double = 8
 
-    /// Called at app launch (delegate) and from the menu's `.onAppear`. First
+    /// Called at app launch (delegate) and whenever the detail popover opens. First
     /// call wires everything up; every call (including reopening the menu)
     /// refreshes, so the numbers are current
     /// the moment the user looks at them.

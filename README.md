@@ -15,6 +15,12 @@ macOS 메뉴바에서 **여러 Codex 계정과 여러 Claude 계정**의 사용�
 최근 7일의 5시간/주간 사용률을 날짜·시간 축으로 볼 수 있다. Codex 리셋 티켓 잔여 수는
 상세 화면에만 표시하며 메뉴바 문자열에는 추가하지 않는다.
 
+계정이 많아 메뉴바가 길어지면 **메뉴바 글씨를 더블 클릭**해 `AI ›`로 접을 수 있다.
+**접힌 표시를 한 번 클릭**하면 계정별 표시를 다시 펼치면서 상세 정보를 연다.
+접힘 상태는 재실행 후에도 유지되며, 접혀 있어도 사용량 갱신과 경고 색상·아이콘은 유지된다.
+펼친 상태의 한 번 클릭은 macOS의 더블 클릭 판별 시간이 지난 뒤 상세 정보를 연다.
+설정의 **메뉴바 접기** 스위치로도 전환할 수 있다.
+
 정상 조회 결과는 계정별로 `~/Library/Application Support/io.riibotics.MacAIUsageBar/usage-history.json`에
 저장한다. 파일에는 시각과 사용률만 기록하며 계정 경로·토큰·자격증명은 포함하지 않는다.
 7일이 지난 기록은 다음 주기 조회 또는 그래프 열기 때 자동으로 삭제된다.
@@ -111,13 +117,15 @@ Sources/
     CodexReader.swift   계정별 CODEX_HOME + App Server 한도 조회
     ClaudeReader.swift  oauth/usage 라이브 조회
     Formatting.swift    % / 리셋 시간 포매팅
-  MacAIUsageBar/      SwiftUI 메뉴바 앱 (MenuBarExtra)
+  MacAIUsageBar/      AppKit 메뉴바 + SwiftUI 상세·설정·그래프
     App.swift           앱 진입점 (Dock 아이콘 없는 accessory 앱)
     AppSettings.swift   설정 상태·Codex/Claude 프로필 (UserDefaults 영속) + 로그인 항목
     UsageStore.swift    계정별 Codex/Claude 상태 + 폴링·백오프
     UsageNotifier.swift 임계값 초과 시 macOS 알림
     Severity.swift      사용률→심각도(정상/주의/경고) 및 색상 매핑
-    BarLabelView.swift  메뉴바 라벨 (이름·색상·경고 아이콘)
+    BarLabel.swift      메뉴바 라벨 (이름·색상·경고 아이콘·접힘 표시)
+    MenuBarController.swift  메뉴바 클릭·접기/펼치기·상세 팝오버·창 관리
+    MenuBarClickState.swift  한 번 클릭/더블 클릭 동작 구분
     MenuContentView.swift  드롭다운 UI
     UsageGraphView.swift   계정별 최근 7일 사용률 그래프
     SettingsView.swift  설정 창
@@ -152,21 +160,29 @@ open dist/MacAIUsageBar.app
 
 ## CI / 릴리즈
 
-macOS 러너는 비싸므로(러너 분 10배) **패키징은 사람이 릴리즈를 요청할 때만** 돈다.
-평소 PR에서는 테스트만 돌고, 설치는 Releases에서 받아서 한다.
+PR에서는 빌드·테스트를 실행한다. **master에 병합되면 새 버전의 설치 파일을 자동 발행**한다.
+직접 master에 push해도 같은 동작을 하며, 설치 파일은 Releases에서 받는다.
 
 | 워크플로 | 트리거 | 하는 일 |
 |---|---|---|
-| `ci.yml` | PR · master push | `swift build` + `swift test` (캐시로 단축). 문서-only 변경은 스킵 |
-| `release.yml` | **수동 실행** · `v*` 태그 push | `.app` 빌드 → zip → **GitHub Release에 첨부**(영구) |
+| `ci.yml` | PR · master push | 버전 결정 로직 검사 + `swift build` + `swift test`. 문서-only 변경은 스킵 |
+| `release.yml` | **master push** · 수동 실행 · `v*` 태그 push | 버전 결정 → 테스트 → `.app`/ZIP 빌드 → **태그 및 GitHub Release 발행** |
 
 ### 릴리즈 만들기 (배포자)
 
-GitHub → **Actions → Release → Run workflow** → 버전(예: `0.2.0`) 입력 → 실행.
+기본적으로 **PR을 master에 병합하면 끝**이다. 테스트가 성공한 병합 커밋에
+`v<버전>` 태그를 만들고 `MacAIUsageBar-<버전>.zip`을 Release에 첨부한다.
+테스트나 빌드가 실패하면 발행하지 않는다.
 
-그러면 현재 커밋에 `v0.2.0` 태그를 만들고, `.app`을 빌드해
-`MacAIUsageBar-0.2.0.zip`을 릴리즈에 첨부한다. 릴리즈 노트에는 설치 안내와
-자동 생성된 변경 내역이 함께 들어간다. 같은 버전이 이미 있으면 빌드 전에 실패한다.
+버전은 가장 높은 정식 `vX.Y.Z` 태그의 patch를 1 올리되, 루트 `VERSION` 파일보다
+낮아지지 않도록 결정한다. `VERSION`이 `1.9.0`이면 첫 병합은 `v1.9.0`, 다음은
+`v1.9.1`, `v1.9.2` 순서다. major/minor 버전을 올릴 때는 PR에서 `VERSION`을 수정한다.
+같은 커밋의 자동 실행을 재시도하면 기존 태그를 재사용하고, 이미 발행된 Release는 건너뛴다.
+로컬 빌드는 `VERSION`을 사용하고, 자동 배포 빌드는 결정된 버전을 `APP_VERSION`으로 전달한다.
+
+특정 버전이나 프리릴리즈를 수동 발행하려면 GitHub → **Actions → Release → Run workflow**에서
+버전(예: `1.10.0-rc.1`)을 입력한다. 같은 버전이 이미 있거나 태그가 다른 커밋을 가리키면
+빌드 전에 실패한다. 릴리즈 노트에는 설치 안내와 자동 생성된 변경 내역이 함께 들어간다.
 
 터미널에서 태그를 직접 밀어도 동일하게 동작한다:
 

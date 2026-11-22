@@ -91,6 +91,7 @@ final class AppSettings: ObservableObject {
     @Published var barWindow: BarWindow { didSet { defaults.set(barWindow.rawValue, forKey: Keys.barWindow) } }
     @Published var showCodex: Bool { didSet { defaults.set(showCodex, forKey: Keys.showCodex) } }
     @Published var showClaude: Bool { didSet { defaults.set(showClaude, forKey: Keys.showClaude) } }
+    @Published var isMenuBarCollapsed: Bool { didSet { defaults.set(isMenuBarCollapsed, forKey: Keys.isMenuBarCollapsed) } }
     @Published var codexAccounts: [CodexAccount] { didSet { persistCodexAccounts() } }
     @Published var claudeAccounts: [ClaudeAccount] { didSet { persistClaudeAccounts() } }
     @Published var launchAtLogin: Bool { didSet { applyLoginItem() } }
@@ -118,13 +119,14 @@ final class AppSettings: ObservableObject {
     static let claudeMinInterval: Double = 180
     static let codexMinInterval: Double = 60
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
     private enum Keys {
         static let displayMode = "displayMode"
         static let barWindow = "barWindow"
         static let showCodex = "showCodex"
         static let showClaude = "showClaude"
+        static let isMenuBarCollapsed = "isMenuBarCollapsed"
         static let codexAccounts = "codexAccounts"
         static let claudeAccounts = "claudeAccounts"
         static let codexInterval = "codexInterval"
@@ -135,11 +137,13 @@ final class AppSettings: ObservableObject {
         static let claudeAutoRefreshViaCLI = "claudeAutoRefreshViaCLI"
     }
 
-    private init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         displayMode = DisplayMode(rawValue: defaults.string(forKey: Keys.displayMode) ?? "") ?? .used
         barWindow = BarWindow(rawValue: defaults.string(forKey: Keys.barWindow) ?? "") ?? .weekly
         showCodex = defaults.object(forKey: Keys.showCodex) as? Bool ?? true
         showClaude = defaults.object(forKey: Keys.showClaude) as? Bool ?? true
+        isMenuBarCollapsed = defaults.bool(forKey: Keys.isMenuBarCollapsed)
         if let data = defaults.data(forKey: Keys.codexAccounts),
            let saved = try? JSONDecoder().decode([CodexAccount].self, from: data),
            !saved.isEmpty {

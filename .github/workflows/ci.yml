@@ -9,13 +9,17 @@ on:
       - 'Sources/**'
       - 'Tests/**'
       - 'Package.swift'
-      - '.github/workflows/ci.yml'
+      - 'VERSION'
+      - 'scripts/**'
+      - '.github/workflows/**'
   pull_request:
     paths:
       - 'Sources/**'
       - 'Tests/**'
       - 'Package.swift'
-      - '.github/workflows/ci.yml'
+      - 'VERSION'
+      - 'scripts/**'
+      - '.github/workflows/**'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -26,6 +30,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate release scripts
+        run: |
+          bash -n scripts/build_app.sh
+          python3 -m unittest discover -s scripts/tests -v
 
       # SwiftPM 빌드 산출물을 캐시해 재빌드 시간을(=러너 분을) 줄인다.
       - name: Cache SwiftPM build

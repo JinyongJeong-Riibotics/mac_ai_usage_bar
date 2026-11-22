@@ -150,6 +150,8 @@ struct SettingsView: View {
             }
 
             Section("표시") {
+                Toggle("메뉴바 접기", isOn: $settings.isMenuBarCollapsed)
+                    .help("메뉴바 글씨를 더블 클릭하면 접고, 접힌 표시를 한 번 클릭하면 펼치면서 상세 정보를 엽니다.")
                 Picker("표시 방식", selection: $settings.displayMode) {
                     ForEach(DisplayMode.allCases) { Text($0.label).tag($0) }
                 }
